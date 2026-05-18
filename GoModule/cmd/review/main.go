@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"cr-assistant/internal/config"
+	"cr-assistant/internal/domain"
 	"cr-assistant/internal/gitlab"
 	"cr-assistant/internal/llm"
 	"cr-assistant/internal/report"
@@ -28,7 +29,17 @@ func main() {
 
 func run(logger *slog.Logger) error {
 	// Загружаем конфигурацию
-	cfg, err := config.Load()
+	//    CONFIG_PATH задан — читаем из файла (локальный запуск).
+	//    Иначе — только из переменных окружения (режим GitLab CI).
+	var (
+		cfg *config.Config
+		err error
+	)
+	if cfgPath := os.Getenv("CONFIG_PATH"); cfgPath != "" {
+		cfg, err = config.LoadFromFile(cfgPath)
+	} else {
+		cfg, err = config.Load()
+	}
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
@@ -46,17 +57,19 @@ func run(logger *slog.Logger) error {
 	logger.Info("starting cr-assistant",
 		"project_id", projectID,
 		"mr_iid", mrIID,
-		"llm_model", cfg.LLMModel,
+		"llm_model", cfg.LLM.Model,
+		"gitlab_url", cfg.GitLab.BaseURL,
 	)
 
 	// Собираем зависимости (dependency injection вручную)
 	gitlabClient := gitlab.NewClient(
-		cfg.GitLabBaseURL,
-		cfg.GitLabToken,
-		time.Duration(cfg.GitLabTimeoutSec)*time.Second,
+		cfg.GitLab.BaseURL,
+		cfg.GitLab.JobToken,
+		cfg.GitLab.BotToken,
+		time.Duration(cfg.GitLab.TimeoutSec)*time.Second,
 		logger,
 	)
-	llmGateway := llm.NewGateway()
+	llmGateway := llm.NewGateway(cfg.LLM.ServiceURL, time.Duration(cfg.LLM.TimeoutSec)*time.Second)
 	reportRenderer := report.NewRenderer()
 
 	orchestrator := review.NewOrchestrator(
@@ -74,9 +87,9 @@ func run(logger *slog.Logger) error {
 	}
 
 	// Определяем exit code
-	if cfg.BlockOnCritical && result.HasCritical {
+	if cfg.Runner.BlockOnCritical && result.HasCritical {
 		logger.Warn("critical issues found, blocking merge",
-			"critical_count", result.TotalByLevel["critical"],
+			"critical_count", result.TotalByLevel[domain.SeverityCritical],
 		)
 		fmt.Fprintln(os.Stderr, "Обнаружены критические замечания. Merge заблокирован.")
 		os.Exit(1)

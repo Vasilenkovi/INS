@@ -2,116 +2,78 @@ package config
 
 import (
 	"fmt"
-	"os"
-	"strconv"
+
+	"github.com/ilyakaznacheev/cleanenv"
 )
 
 // Config хранит всю конфигурацию бота.
-// Значения берутся из переменных окружения, которые GitLab CI
-// передаёт в контейнер при запуске job.
+// Теги env        — переменные окружения (GitLab CI проставляет автоматически).
+// Теги yaml       — поля в config.yml для локального запуска.
+// Теги env-default — значения по умолчанию.
+// Теги env-required — обязательные поля, cleanenv вернёт ошибку если не заданы.
 type Config struct {
-	// GitLab
-	// CI_SERVER_URL и CI_JOB_TOKEN проставляются GitLab автоматически.
-	GitLabBaseURL string // CI_SERVER_URL, например https://gitlab.example.com
-	GitLabToken   string // CI_JOB_TOKEN
+	GitLab GitLabConfig `yaml:"gitlab"`
+	LLM    LLMConfig    `yaml:"llm"`
+	Runner RunnerConfig `yaml:"runner"`
+}
 
-	// LLM Python-модуль
-	// Адрес сервиса, который будет вызывать self-hosted LLM.
-	// Оставлен опциональным — модуль пока не реализован.
-	LLMServiceURL string // LLM_SERVICE_URL
-	LLMModel      string // LLM_MODEL, default: deepseek-coder
+type GitLabConfig struct {
+	// CI_SERVER_URL — GitLab проставляет автоматически в CI-окружении.
+	BaseURL string `yaml:"base_url" env:"CI_SERVER_URL" env-required:"true" env-description:"GitLab server URL"`
 
-	// Параллелизм
-	MaxWorkers int // MAX_WORKERS, default: 5
+	// CI_JOB_TOKEN — GitLab проставляет автоматически. Используется только
+	// для чтения: получение diff, информации о MR.
+	JobToken string `yaml:"job_token" env:"CI_JOB_TOKEN" env-required:"true" env-description:"GitLab CI job token (read-only)"`
 
-	// Таймауты (секунды)
-	LLMTimeoutSec    int // LLM_TIMEOUT_SEC, default: 60
-	GitLabTimeoutSec int // GITLAB_TIMEOUT_SEC, default: 30
+	// CR_BOT_TOKEN — Personal Access Token технического пользователя бота.
+	// Требует права api. Используется для публикации комментариев и отчётов.
+	// Создаётся вручную под bot-пользователем, хранится как protected CI variable.
+	BotToken string `yaml:"bot_token" env:"CR_BOT_TOKEN" env-required:"true" env-description:"Bot PAT for posting comments (api scope)"`
 
-	// Блокировка pipeline
+	// Таймаут HTTP-запросов к GitLab API.
+	TimeoutSec int `yaml:"timeout_sec" env:"GITLAB_TIMEOUT_SEC" env-default:"30" env-description:"GitLab API request timeout in seconds"`
+}
+
+type LLMConfig struct {
+	// Адрес Python LLM-модуля / mock-сервера.
+	ServiceURL string `yaml:"service_url" env:"LLM_SERVICE_URL" env-default:"http://mock-llm:8000" env-description:"LLM service URL"`
+
+	// Название модели, передаётся в Python-модулю.
+	Model string `yaml:"model" env:"LLM_MODEL" env-default:"deepseek-coder" env-description:"LLM model name"`
+
+	// Таймаут одного LLM-запроса.
+	TimeoutSec int `yaml:"timeout_sec" env:"LLM_TIMEOUT_SEC" env-default:"60" env-description:"LLM request timeout in seconds"`
+}
+
+type RunnerConfig struct {
+	// Максимальное число параллельных LLM-запросов.
+	MaxWorkers int `yaml:"max_workers" env:"MAX_WORKERS" env-default:"5" env-description:"Max parallel LLM workers"`
+
 	// Если true — exit code 1 при наличии Critical-замечаний.
-	BlockOnCritical bool // BLOCK_ON_CRITICAL, default: true
+	BlockOnCritical bool `yaml:"block_on_critical" env:"BLOCK_ON_CRITICAL" env-default:"true" env-description:"Exit with code 1 if critical issues found"`
 }
 
 // Load читает конфигурацию из переменных окружения.
-// Возвращает ошибку, если обязательное поле отсутствует.
+// Используется внутри GitLab CI — все значения приходят через env.
 func Load() (*Config, error) {
-	cfg := &Config{}
+	var cfg Config
 
-	var err error
-
-	// Обязательные поля
-	if cfg.GitLabBaseURL, err = requireEnv("CI_SERVER_URL"); err != nil {
-		return nil, err
-	}
-	if cfg.GitLabToken, err = requireEnv("CI_JOB_TOKEN"); err != nil {
-		return nil, err
+	if err := cleanenv.ReadEnv(&cfg); err != nil {
+		return nil, fmt.Errorf("config: read environment: %w", err)
 	}
 
-	// Опциональные поля
-	cfg.LLMServiceURL = optionalEnv("LLM_SERVICE_URL", "")
-	cfg.LLMModel = optionalEnv("LLM_MODEL", "deepseek-coder")
-
-	cfg.MaxWorkers, err = parseInt("MAX_WORKERS", 5)
-	if err != nil {
-		return nil, err
-	}
-
-	cfg.LLMTimeoutSec, err = parseInt("LLM_TIMEOUT_SEC", 60)
-	if err != nil {
-		return nil, err
-	}
-
-	cfg.GitLabTimeoutSec, err = parseInt("GITLAB_TIMEOUT_SEC", 30)
-	if err != nil {
-		return nil, err
-	}
-
-	cfg.BlockOnCritical, err = parseBool("BLOCK_ON_CRITICAL", true)
-	if err != nil {
-		return nil, err
-	}
-
-	return cfg, nil
+	return &cfg, nil
 }
 
-// helpers
+// LoadFromFile читает конфигурацию из yaml-файла,
+// переменные окружения переопределяют значения из файла.
+// Используется для локального запуска вне GitLab CI.
+func LoadFromFile(path string) (*Config, error) {
+	var cfg Config
 
-func requireEnv(key string) (string, error) {
-	v := os.Getenv(key)
-	if v == "" {
-		return "", fmt.Errorf("required environment variable %q is not set", key)
+	if err := cleanenv.ReadConfig(path, &cfg); err != nil {
+		return nil, fmt.Errorf("config: read file %q: %w", path, err)
 	}
-	return v, nil
-}
 
-func optionalEnv(key, defaultVal string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return defaultVal
-}
-
-func parseInt(key string, defaultVal int) (int, error) {
-	v := os.Getenv(key)
-	if v == "" {
-		return defaultVal, nil
-	}
-	n, err := strconv.Atoi(v)
-	if err != nil {
-		return 0, fmt.Errorf("environment variable %q must be an integer, got %q", key, v)
-	}
-	return n, nil
-}
-
-func parseBool(key string, defaultVal bool) (bool, error) {
-	v := os.Getenv(key)
-	if v == "" {
-		return defaultVal, nil
-	}
-	b, err := strconv.ParseBool(v)
-	if err != nil {
-		return false, fmt.Errorf("environment variable %q must be a boolean (true/false/1/0), got %q", key, v)
-	}
-	return b, nil
+	return &cfg, nil
 }

@@ -36,7 +36,17 @@ func NewOrchestrator(
 func (o *Orchestrator) Run(ctx context.Context, projectID, mrIID int) (*domain.ReviewResult, error) {
 	o.logger.Info("starting review", "project_id", projectID, "mr_iid", mrIID)
 
-	// Получаем diff
+	// Получаем diff_refs для inline-позиционирования комментариев.
+	// Если GitLab ещё не обработал MR - продолжаем в fallback-режиме
+	refs, err := o.gitlab.GetMRDiffRefs(ctx, projectID, mrIID)
+	if err != nil {
+		o.logger.Warn("could not fetch diff_refs, inline comments will be posted as notes",
+			"error", err,
+		)
+		refs = domain.DiffRefs{} // Empty() == true - fallback в PostInlineComment
+	}
+
+	// Получаем diff файлов MR.
 	diffs, err := o.gitlab.GetMRDiffs(ctx, projectID, mrIID)
 	if err != nil {
 		return nil, fmt.Errorf("orchestrator: get diffs: %w", err)
@@ -58,12 +68,23 @@ func (o *Orchestrator) Run(ctx context.Context, projectID, mrIID int) (*domain.R
 
 	// Формируем итоговый результат
 	result := buildResult(allComments)
-	o.logger.Info("review completed", "verdict", result.Verdict, "critical", result.TotalByLevel[domain.SeverityCritical])
+	o.logger.Info("review completed",
+		"verdict", result.Verdict,
+		"critical", result.TotalByLevel[domain.SeverityCritical],
+		"major", result.TotalByLevel[domain.SeverityMajor],
+		"minor", result.TotalByLevel[domain.SeverityMinor],
+	)
 
 	// Публикуем inline-комментарии
+	// refs передаётся в каждый вызов; если refs.Empty() - PostInlineComment
+	// переключится на fallback note.
 	for _, c := range allComments {
-		if err := o.gitlab.PostInlineComment(ctx, projectID, mrIID, c); err != nil {
-			o.logger.Warn("failed to post inline comment", "error", err)
+		if err := o.gitlab.PostInlineComment(ctx, projectID, mrIID, c, refs); err != nil {
+			o.logger.Warn("failed to post inline comment",
+				"file", c.FilePath,
+				"line", c.Line,
+				"error", err,
+			)
 		}
 	}
 

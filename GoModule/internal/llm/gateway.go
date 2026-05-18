@@ -2,15 +2,23 @@ package llm
 
 import (
 	"context"
+	"time"
+
 	"cr-assistant/internal/domain"
 )
 
 // Gateway заглушка взаимодействия с Python LLM модулем.
 // Будет реализована после того, как Python-модуль будет готов.
-type Gateway struct{}
+type Gateway struct {
+	serviceURL string
+	timeout    time.Duration
+}
 
-func NewGateway() *Gateway {
-	return &Gateway{}
+func NewGateway(serviceURL string, timeout time.Duration) *Gateway {
+	return &Gateway{
+		serviceURL: serviceURL,
+		timeout:    timeout,
+	}
 }
 
 // Analyze заглушка. Всегда возвращает пустой список замечаний.
