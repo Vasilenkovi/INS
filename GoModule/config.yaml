@@ -1,0 +1,5 @@
+gitlab:
+  base_url: https://gitlab.local
+  job_token: hj5432b
+  bot_token: fhukdn
+  timeout_sec: 10
