@@ -2,84 +2,79 @@ import os
 import json
 import yaml
 import asyncio
-from openai import AsyncOpenAI
+import httpx
 
 
 class DeepSeekClient:
     def __init__(self):
         self.api_key = os.getenv("DEEPSEEK_API_KEY")
-        self.base_url = os.getenv("DEEPSEEK_BASE_URL", "https://deepseek.com")
-        self.model = os.getenv("LLM_MODEL_NAME", "deepseek-coder")
+        # Адрес сервера университета (например, http://192.168.1.50:8000)
+        self.base_url = os.getenv("DEEPSEEK_BASE_URL", "http://localhost:8000")
 
-        # Если ключ есть и он не похож на заглушку, инициализируем реальный клиент
-        if self.api_key and not self.api_key.startswith("mock") and self.api_key != "your_key_here":
-            self.client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url)
+        # Переключатель версий API университета (true = /api/v1, false = /v1)
+        self.use_new_api_prefix = os.getenv("USE_NEW_API", "true").lower() == "true"
+
+        # Настраиваем эндпоинты по данным университета
+        if self.use_new_api_prefix:
+            self.models_url = f"{self.base_url}/api/v1/models"
+            self.chat_url = f"{self.base_url}/api/v1/chat"
+        else:
+            self.models_url = f"{self.base_url}/v1/models"
+            self.chat_url = f"{self.base_url}/v1/responses"
+
+        # Включение mock-режима, если ключ не задан
+        if self.api_key and not self.api_key.startswith("mock"):
             self.is_mock = False
         else:
-            self.client = None
             self.is_mock = True
-            print("Инициализирован MOCK-РЕЖИМ для LLM. Запросы к API отправляться не будут.")
+            print(f"⚠️ MOCK-РЕЖИМ. Эндпоинты университета макетированы: {self.chat_url}")
 
     async def generate_review_as_yaml(self, system_prompt: str, user_prompt: str) -> str:
-        """Основной пайплайн ревью кода с поддержкой заглушки"""
+        """Отправка запроса на анализ в API университета"""
         if self.is_mock:
-            # Имитируем небольшую задержку сети (1.5 секунды)
             await asyncio.sleep(1.5)
-
-            # Заготовка идеального ответа для демонстрации
             mock_json_response = {
-                "score": 6,
+                "score": 5,
                 "issues": [
                     {
-                        "line": 14,
+                        "line": 12,
                         "severity": "critical",
                         "category": "architecture",
-                        "message": "Критическая ошибка архитектуры: Обнаружен прямой вызов базы данных из слоя Controller в обход UserService. Это нарушает правила изоляции слоев вашего YAML-стандарта.",
-                        "suggestion": "# Вместо: db.execute('SELECT * FROM users')\n# Используйте:\nreturn await self.user_service.get_all_users()"
-                    },
-                    {
-                        "line": 28,
-                        "severity": "warning",
-                        "category": "security",
-                        "message": "Потенциальная уязвимость: Входной параметр 'user_id' встраивается в строку запроса. Это может привести к SQL-инъекции. Требуется обязательная валидация входящих данных.",
-                        "suggestion": "# Вместо: f'SELECT * FROM items WHERE id = {user_id}'\n# Используйте плейсхолдеры:\ncursor.execute('SELECT * FROM items WHERE id = %s', (user_id,))"
+                        "message": "Нарушение стандарта вуза: Контроллер обращается к репозиторию в обход слоя Service.",
+                        "suggestion": "return await self.user_service.get_user(user_id)"
                     }
                 ]
             }
             return yaml.dump(mock_json_response, allow_unicode=True, sort_keys=False, default_flow_style=False)
 
-        # Логика реального запроса к LLM (если ключ предоставлен)
-        try:
-            response = await self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
-                response_format={"type": "json_object"},
-                temperature=0.2
-            )
-            json_data = json.loads(response.choices.message.content)
-            return yaml.dump(json_data, allow_unicode=True, sort_keys=False, default_flow_style=False)
-        except Exception as e:
-            return yaml.dump({"status": "error", "message": f"Pipeline error: {str(e)}"})
+        # РЕАЛЬНЫЙ ЗАПРОС К API УНИВЕРСИТЕТА
+        # Формируем стандартное тело запроса
+        payload = {
+            "model": os.getenv("LLM_MODEL_NAME", "qwen2.5-coder:7b"),
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            "temperature": 0.2
+        }
 
-    async def convert_text_to_yaml_config(self, user_text_description: str) -> str:
-        """Заглушка для генерации конфигурации из сырого текста"""
-        if self.is_mock:
-            await asyncio.sleep(1.0)
-            with open("config/standard.yaml", "r", encoding="utf-8") as f:
-                return f.read()
+        headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
 
-        # Реальный запрос к LLM
-        from python_processor.src.prompt_builder import PromptBuilder
-        prompt = PromptBuilder.build_text_to_yaml_prompt(user_text_description)
-        try:
-            response = await self.client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.1
-            )
-            return response.choices.message.content.strip()
-        except Exception as e:
-            return f"Error creating config: {str(e)}"
+        async with httpx.AsyncClient() as client:
+            try:
+                # Шлем POST запрос на  /api/v1/chat или /v1/responses
+                response = await client.post(self.chat_url, json=payload, headers=headers, timeout=30.0)
+                response.raise_for_status()
+
+                # Парсим ответ
+                response_data = response.json()
+
+                # Извлекаем текст ответа ИИ
+                ai_content = response_data["choices"][0]["message"]["content"]
+
+                # Конвертируем строку от ИИ (JSON) в словарь, а затем в YAML для Go-бэкенда
+                json_dict = json.loads(ai_content)
+                return yaml.dump(json_dict, allow_unicode=True, sort_keys=False, default_flow_style=False)
+
+            except Exception as e:
+                return yaml.dump({"status": "error", "message": f"University API Error: {str(e)}"})
