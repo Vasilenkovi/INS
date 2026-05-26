@@ -1,0 +1,52 @@
+version: 1.0
+project:
+  name: "university-python-standard"
+  language: "python"
+
+severity_levels:
+  - critical
+  - warning
+  - info
+
+review_priorities:
+  architecture: 0.4
+  security: 0.4
+  readability: 0.2
+
+architecture:
+  layers:
+    - controller
+    - service
+    - repository
+  forbidden_dependencies:
+    - from: "controller"
+      to: "repository"
+      reason: "Controllers must use services only"
+
+security:
+  forbid:
+    - eval
+    - exec
+    - raw_sql_concat
+  require:
+    - input_validation
+    - auth_check
+
+anti_patterns:
+  - id: "empty_except"
+    description: "Empty exception handler"
+    pattern: "except:"
+    severity: "warning"
+  - id: "god_object"
+    description: "Large class with too many responsibilities"
+    severity: "warning"
+
+llm_review:
+  ignore_formatting: true
+  focus_on:
+    - architecture
+    - vulnerabilities
+    - business_logic
+  require_fix_suggestions: true
+  response_format:
+    type: "json"
