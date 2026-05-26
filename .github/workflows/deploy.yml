@@ -20,12 +20,12 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      #Сборка и отправка Go бэкенда
+      # Сборка и отправка Go бэкенда
       - name: Build and push Go Backend
         uses: docker/build-push-action@v5
         with:
-          context: ./INS/GoModule
-          file: ./INS/GoModule/Dockerfile
+          context: ./GoModule
+          file: ./GoModule/Dockerfile
           push: true
           tags: sam228269/tool:latest
 
@@ -33,7 +33,7 @@ jobs:
       - name: Build and push Python Processor
         uses: docker/build-push-action@v5
         with:
-          context: ./INS/python_processor
-          file: ./INS/python_processor/Dockerfile
+          context: ./python_processor
+          file: ./python_processor/Dockerfile
           push: true
-          tags: sam228269/tool-processor:latest 
+          tags: sam228269/tool-processor:latest
