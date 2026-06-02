@@ -29,8 +29,8 @@ type FileDiff struct {
 
 // ReviewResult — итог анализа одного MR.
 type ReviewResult struct {
-	Comments     []Comment
-	HasCritical  bool
+	Comments    []Comment
+	HasCritical bool
 	TotalByLevel map[Severity]int
-	Verdict      string // "Пройдено" / "Требует исправления"
+	Verdict     string // "Пройдено" / "Требует исправления"
 }

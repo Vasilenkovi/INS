@@ -10,18 +10,17 @@ import (
 // =============================================================================
 
 type Team struct {
-	ID          string
-	Name        string
-	Slug        string // уникальный идентификатор команды, URL-safe
-	Description string
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Slug        string `json:"slug"`
+	Description string `json:"description"`
 
-	// Привязка к GitLab-группе — источник прав доступа.
-	GitLabGroupID   int
-	GitLabGroupPath string // например "company/backend"
+	GitLabGroupID   int    `json:"gitlab_group_id"`
+	GitLabGroupPath string `json:"gitlab_group_path"`
 
-	CreatedBy string // GitLab username
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	CreatedBy string    `json:"created_by"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 func (t *Team) Validate() error {
@@ -92,27 +91,27 @@ type CodeStandard struct {
 // Версии иммутабельны: новая загрузка создаёт новую версию,
 // а не изменяет существующую.
 type StandardVersion struct {
-	ID             string
-	CodeStandardID string
+	ID             string `json:"id"`
+	CodeStandardID string `json:"code_standard_id"`
 
-	Version int // монотонно возрастающий номер, 1, 2, 3, ...
+	Version int `json:"version"` // монотонно возрастающий номер, 1, 2, 3, ...
 
 	// Пресет из встроенных: "PEP8", "Google Python Style Guide",
 	// "Airbnb JavaScript Style Guide", "StandardJS" и т.д.
 	// Пустая строка означает что пресет не используется.
-	Preset string
+	Preset string `json:"preset"`
 
 	// Произвольный стандарт в Markdown или plain text.
 	// Может дополнять или переопределять пресет.
-	CustomRules string
+	CustomRules string `json:"custom_rules"`
 
 	// Язык комментариев бота для этой команды.
-	Language string // "ru", "en", ...
+	Language string `json:"language"`
 
-	Comment string // необязательный комментарий к версии (что изменилось)
+	Comment string `json:"comment"` // необязательный комментарий к версии (что изменилось)
 
-	CreatedBy string // GitLab username
-	CreatedAt time.Time
+	CreatedBy string    `json:"created_by"` // GitLab username
+	CreatedAt time.Time `json:"created_at"`
 }
 
 func (v *StandardVersion) Validate() error {

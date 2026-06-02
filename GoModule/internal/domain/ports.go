@@ -33,18 +33,18 @@ type GitLabPort interface {
 	// PostSummaryComment публикует итоговый комментарий к MR.
 	PostSummaryComment(ctx context.Context, projectID, mrIID int, result ReviewResult) error
 
-	// PostHTMLReport загружает HTML-отчёт как артефакт и публикует ссылку в MR.
+	// PostHTMLReport публикует уведомление об HTML-отчёте в MR.
 	PostHTMLReport(ctx context.Context, projectID, mrIID int, html string) error
 }
 
-// LLMPort взаимодействие с Python-модулем / LLM API.
-// Пока заглушка реализация появится вместе с Python-модулем.
+// LLMPort — взаимодействие с Python-модулем / LLM API.
+// Пока заглушка — реализация появится вместе с Python-модулем.
 type LLMPort interface {
 	// Analyze отправляет diff файла и возвращает список замечаний.
 	Analyze(ctx context.Context, diff FileDiff, codeStandard string) ([]Comment, error)
 }
 
-// ReportPort генерация HTML-отчёта.
+// ReportPort — генерация HTML-отчёта.
 type ReportPort interface {
 	Render(result ReviewResult) (string, error)
 }

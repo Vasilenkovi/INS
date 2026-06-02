@@ -10,7 +10,8 @@ import (
 	"time"
 )
 
-// Client низкоуровневый HTTP-клиент для GitLab API v4.
+// Client — низкоуровневый HTTP-клиент для GitLab API v4.
+//
 // Использует два токена с разными правами:
 //   - jobToken (CI_JOB_TOKEN) — только чтение: diff, информация о MR.
 //   - botToken (CR_BOT_TOKEN) — запись: публикация комментариев и отчётов.

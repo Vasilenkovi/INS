@@ -7,9 +7,8 @@ import (
 	"fmt"
 	"time"
 
-	"standards-service/internal/domain"
-
 	"github.com/google/uuid"
+	"standards-service/internal/domain"
 )
 
 // =============================================================================

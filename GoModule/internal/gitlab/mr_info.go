@@ -9,8 +9,8 @@ import (
 
 // mrInfoResponse — часть ответа GitLab API на GET /merge_requests/:iid.
 type mrInfoResponse struct {
-	IID      int          `json:"iid"`
-	DiffRefs diffRefsJSON `json:"diff_refs"`
+	IID      int           `json:"iid"`
+	DiffRefs diffRefsJSON  `json:"diff_refs"`
 }
 
 // diffRefsJSON — JSON-представление diff_refs из GitLab API.
