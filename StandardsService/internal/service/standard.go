@@ -81,6 +81,7 @@ func (s *StandardService) Upload(ctx context.Context, teamSlug string, input *do
 
 // GetActive возвращает активную версию стандарта команды.
 // Доступно Developer и выше.
+// GetActive возвращает активную версию стандарта команды.
 func (s *StandardService) GetActive(ctx context.Context, teamSlug string, token string) (*domain.StandardVersion, error) {
 	user, err := s.auth.VerifyUser(ctx, token)
 	if err != nil {
@@ -102,7 +103,11 @@ func (s *StandardService) GetActive(ctx context.Context, teamSlug string, token 
 		return nil, fmt.Errorf("standard not found for team %q", teamSlug)
 	}
 
-	return s.versions.GetActive(ctx, standard.ID)
+	if standard.ActiveVersionID == nil {
+		return nil, fmt.Errorf("no active version")
+	}
+
+	return s.versions.GetByID(ctx, *standard.ActiveVersionID)
 }
 
 // ListVersions возвращает все версии стандарта команды. Доступно Developer и выше.

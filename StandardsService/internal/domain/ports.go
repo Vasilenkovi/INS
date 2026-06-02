@@ -71,8 +71,13 @@ type GitLabGroup struct {
 
 // AuthPort — проверка прав через GitLab API.
 type AuthPort interface {
-	// VerifyUser проверяет токен и возвращает пользователя.
+	// VerifyUser проверяет PAT и возвращает пользователя.
 	VerifyUser(ctx context.Context, token string) (*GitLabUser, error)
+
+	// VerifyJobToken проверяет что токен является валидным CI_JOB_TOKEN.
+	// Используется CI job'ами (cr-assistant) — не требует PAT.
+	// GET /api/v4/job — возвращает 200 если токен живой.
+	VerifyJobToken(ctx context.Context, token string) error
 
 	// GetGroupAccessLevel возвращает уровень доступа пользователя в группе.
 	GetGroupAccessLevel(ctx context.Context, token string, groupID, userID int) (AccessLevel, error)

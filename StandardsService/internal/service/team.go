@@ -5,6 +5,8 @@ import (
 	"fmt"
 
 	"standards-service/internal/domain"
+
+	"github.com/google/uuid"
 )
 
 type TeamService struct {
@@ -28,11 +30,12 @@ func (s *TeamService) Create(ctx context.Context, team *domain.Team, token strin
 		return nil, fmt.Errorf("forbidden: maintainer access required in group %d", team.GitLabGroupID)
 	}
 
-	// Получаем путь группы из GitLab
 	group, err := s.auth.GetGroupByID(ctx, token, team.GitLabGroupID)
 	if err != nil {
 		return nil, fmt.Errorf("gitlab group not found: %w", err)
 	}
+
+	team.ID = uuid.NewString()
 	team.GitLabGroupPath = group.FullPath
 	team.CreatedBy = user.Username
 
@@ -43,6 +46,7 @@ func (s *TeamService) Create(ctx context.Context, team *domain.Team, token strin
 	if err := s.teams.Create(ctx, team); err != nil {
 		return nil, fmt.Errorf("create team: %w", err)
 	}
+
 	return team, nil
 }
 

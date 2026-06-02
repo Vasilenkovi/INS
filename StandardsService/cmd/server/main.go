@@ -1,19 +1,17 @@
 package main
 
 import (
-	"database/sql"
-	"fmt"
 	"log/slog"
 	"os"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	_ "github.com/lib/pq"
 
-	handler "standards-service/internal/api/handlers"
+	"standards-service/internal/api/handler"
 	"standards-service/internal/api/middleware"
 	"standards-service/internal/auth"
 	"standards-service/internal/config"
+	"standards-service/internal/db"
 	"standards-service/internal/repository/postgres"
 	"standards-service/internal/service"
 )
@@ -31,26 +29,32 @@ func run(logger *slog.Logger) error {
 	// 1. Config
 	cfg, err := loadConfig()
 	if err != nil {
-		return fmt.Errorf("load config: %w", err)
+		return err
 	}
 
-	// 2. Database
-	db, err := sql.Open("postgres", cfg.Database.DSN)
+	// 2. Database — подключение и миграции
+	// MIGRATIONS_PATH можно переопределить через env (полезно в Docker/тестах).
+	// По умолчанию "file:///migrations" — абсолютный путь, совместимый со scratch-образом.
+	migrationsPath := os.Getenv("MIGRATIONS_PATH")
+	if migrationsPath == "" {
+		migrationsPath = "file:///migrations"
+	}
+	dbCfg := db.DefaultConfig(cfg.Database.DSN, migrationsPath)
+	database, err := db.Open(dbCfg, logger)
 	if err != nil {
-		return fmt.Errorf("open db: %w", err)
+		return err
 	}
-	defer db.Close()
+	defer database.Close()
 
-	if err := db.Ping(); err != nil {
-		return fmt.Errorf("ping db: %w", err)
+	if err := db.Migrate(database, dbCfg, logger); err != nil {
+		return err
 	}
-	logger.Info("database connected")
 
 	// 3. Repositories
-	teamRepo := postgres.NewTeamRepo(db)
-	repoRepo := postgres.NewRepositoryRepo(db)
-	standardRepo := postgres.NewCodeStandardRepo(db)
-	versionRepo := postgres.NewStandardVersionRepo(db)
+	teamRepo := postgres.NewTeamRepo(database)
+	repoRepo := postgres.NewRepositoryRepo(database)
+	standardRepo := postgres.NewCodeStandardRepo(database)
+	versionRepo := postgres.NewStandardVersionRepo(database)
 
 	// 4. Auth
 	gitlabAuth := auth.NewGitLabAuthService(
@@ -62,11 +66,13 @@ func run(logger *slog.Logger) error {
 	teamSvc := service.NewTeamService(teamRepo, gitlabAuth)
 	repoSvc := service.NewRepositoryService(repoRepo, teamRepo, gitlabAuth)
 	standardSvc := service.NewStandardService(standardRepo, versionRepo, teamRepo, gitlabAuth)
+	ciSvc := service.NewCIService(repoRepo, standardRepo, versionRepo, gitlabAuth)
 
 	// 6. Handlers
 	teamH := handler.NewTeamHandler(teamSvc)
 	repoH := handler.NewRepositoryHandler(repoSvc)
 	standardH := handler.NewStandardHandler(standardSvc)
+	ciH := handler.NewCIHandler(ciSvc)
 
 	// 7. Router
 	r := gin.New()
@@ -76,21 +82,25 @@ func run(logger *slog.Logger) error {
 		c.JSON(200, gin.H{"status": "ok"})
 	})
 
+	// /internal/v1/ — machine-to-machine, аутентификация по CI_JOB_TOKEN.
+	// Токен проверяется внутри handler'а (не через Bearer middleware).
+	internal := r.Group("/internal/v1")
+	{
+		internal.GET("/projects/:gitlab_project_id/standard", ciH.GetStandard)
+	}
+
 	api := r.Group("/api/v1", middleware.Auth(gitlabAuth))
 	{
-		// Teams
 		api.POST("/teams", teamH.Create)
 		api.GET("/teams", teamH.List)
 		api.GET("/teams/:slug", teamH.Get)
 		api.PATCH("/teams/:slug", teamH.Update)
 		api.DELETE("/teams/:slug", teamH.Delete)
 
-		// Repositories
 		api.POST("/teams/:slug/repos", repoH.Add)
 		api.GET("/teams/:slug/repos", repoH.List)
 		api.DELETE("/teams/:slug/repos/:repo_id", repoH.Remove)
 
-		// Standards
 		api.POST("/teams/:slug/standards", standardH.Upload)
 		api.GET("/teams/:slug/standards/active", standardH.GetActive)
 		api.GET("/teams/:slug/standards/versions", standardH.ListVersions)

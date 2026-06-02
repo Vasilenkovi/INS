@@ -26,6 +26,31 @@ func NewGitLabAuthService(gitlabURL string, timeout time.Duration) *GitLabAuthSe
 	}
 }
 
+// VerifyJobToken проверяет CI_JOB_TOKEN через GET /api/v4/job.
+// GitLab возвращает 200 + информацию о job если токен валидный.
+// Используется для аутентификации CI job'ов без PAT.
+func (s *GitLabAuthService) VerifyJobToken(ctx context.Context, token string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.gitlabURL+"/api/v4/job", nil)
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("JOB-TOKEN", token)
+
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return fmt.Errorf("invalid job token")
+	}
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("unexpected status %d", resp.StatusCode)
+	}
+	return nil
+}
+
 // VerifyUser проверяет токен через GET /api/v4/user.
 func (s *GitLabAuthService) VerifyUser(ctx context.Context, token string) (*domain.GitLabUser, error) {
 	var user struct {
@@ -46,15 +71,24 @@ func (s *GitLabAuthService) VerifyUser(ctx context.Context, token string) (*doma
 }
 
 // GetGroupAccessLevel возвращает уровень доступа пользователя в группе.
-// GET /api/v4/groups/:id/members/:user_id
+// Сначала пробует GET /api/v4/groups/:id/members/:user_id (прямые члены),
+// при 404 — fallback на /members/all (унаследованные члены и group bot'ы).
 func (s *GitLabAuthService) GetGroupAccessLevel(ctx context.Context, token string, groupID, userID int) (domain.AccessLevel, error) {
 	var member struct {
 		AccessLevel int `json:"access_level"`
 	}
 
+	// Сначала прямые члены группы
 	path := fmt.Sprintf("/api/v4/groups/%d/members/%d", groupID, userID)
-	if err := s.get(ctx, token, path, &member); err != nil {
-		// Пользователь не найден в группе — нет доступа
+	err := s.get(ctx, token, path, &member)
+	if err == nil {
+		return domain.AccessLevel(member.AccessLevel), nil
+	}
+
+	// Fallback: унаследованные члены (подгруппы, group bot'ы, inherited access)
+	// GET /api/v4/groups/:id/members/all/:user_id
+	allPath := fmt.Sprintf("/api/v4/groups/%d/members/all/%d", groupID, userID)
+	if err2 := s.get(ctx, token, allPath, &member); err2 != nil {
 		return 0, fmt.Errorf("get group access level: %w", err)
 	}
 

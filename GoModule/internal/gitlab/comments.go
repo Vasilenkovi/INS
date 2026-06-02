@@ -8,7 +8,9 @@ import (
 	"cr-assistant/internal/domain"
 )
 
+// =============================================================================
 // Inline comment
+// =============================================================================
 
 // PostInlineComment публикует замечание к конкретной строке diff в MR.
 // Реализует domain.GitLabPort.
@@ -89,7 +91,9 @@ func (c *Client) postFallbackNote(ctx context.Context, projectID, mrIID int, com
 	return nil
 }
 
+// =============================================================================
 // Summary comment
+// =============================================================================
 
 // PostSummaryComment публикует итоговый комментарий-резюме к MR.
 // Реализует domain.GitLabPort.
@@ -112,13 +116,15 @@ func (c *Client) PostSummaryComment(ctx context.Context, projectID, mrIID int, r
 	return nil
 }
 
+// =============================================================================
 // HTML Report
+// =============================================================================
 
 // PostHTMLReport публикует уведомление о HTML-отчёте как note в MR.
 // Реализует domain.GitLabPort.
 //
 // Сам HTML сохраняется как GitLab CI Job Artifact (через artifacts: paths:
-// в .gitlab-ci.yml) API для этого не нужен. Здесь публикуем только ссылку.
+// в .gitlab-ci.yml) — API для этого не нужен. Здесь публикуем только ссылку.
 func (c *Client) PostHTMLReport(ctx context.Context, projectID, mrIID int, html string) error {
 	// TODO: сформировать реальную ссылку на артефакт через CI_JOB_ID и CI_PROJECT_ID
 	body := "📋 **HTML-отчёт** сформирован и доступен в артефактах CI job."
@@ -133,9 +139,10 @@ func (c *Client) PostHTMLReport(ctx context.Context, projectID, mrIID int, html 
 	return nil
 }
 
+// =============================================================================
 // Formatters
+// =============================================================================
 
-// formatComment формирует текст inline-комментария по шаблону.
 func formatComment(c domain.Comment) string {
 	var sb strings.Builder
 
@@ -152,7 +159,6 @@ func formatComment(c domain.Comment) string {
 	return sb.String()
 }
 
-// formatSummary формирует текст summary-комментария.
 func formatSummary(r domain.ReviewResult) string {
 	var sb strings.Builder
 
@@ -161,7 +167,10 @@ func formatSummary(r domain.ReviewResult) string {
 		verdictIcon = "❌"
 	}
 
-	sb.WriteString(fmt.Sprintf("## %s Результат автоматического код-ревью: **%s**\n\n", verdictIcon, r.Verdict))
+	sb.WriteString(fmt.Sprintf(
+		"## %s Результат автоматического код-ревью: **%s**\n\n",
+		verdictIcon, r.Verdict,
+	))
 	sb.WriteString("| Уровень | Кол-во |\n")
 	sb.WriteString("|---------|--------|\n")
 	sb.WriteString(fmt.Sprintf("| 🔴 Critical | %d |\n", r.TotalByLevel[domain.SeverityCritical]))

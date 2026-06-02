@@ -22,7 +22,10 @@ func NewRepositoryService(
 }
 
 // Add привязывает GitLab-проект к команде.
-// Требует: пользователь — Maintainer проекта И Maintainer группы команды.
+// Требует: пользователь — Maintainer или Owner группы команды.
+// Проверка прав на сам GitLab-проект опциональна: если пользователь является
+// group bot'ом или унаследованным членом без прямого доступа к проекту —
+// достаточно прав на уровне группы.
 func (s *RepositoryService) Add(ctx context.Context, teamSlug string, repo *domain.Repository, token string) (*domain.Repository, error) {
 	user, err := s.auth.VerifyUser(ctx, token)
 	if err != nil {
@@ -34,16 +37,21 @@ func (s *RepositoryService) Add(ctx context.Context, teamSlug string, repo *doma
 		return nil, fmt.Errorf("team not found: %w", err)
 	}
 
-	// Проверяем права на GitLab-проект
-	projectLevel, err := s.auth.GetProjectAccessLevel(ctx, token, repo.GitLabID, user.ID)
-	if err != nil || projectLevel < domain.AccessLevelMaintainer {
-		return nil, fmt.Errorf("forbidden: maintainer access required on gitlab project %d", repo.GitLabID)
-	}
-
-	// Проверяем права в группе команды
+	// Проверяем права в группе команды — Maintainer (40) или Owner (50).
+	// Owner > Maintainer числово, поэтому одна проверка покрывает оба случая.
 	groupLevel, err := s.auth.GetGroupAccessLevel(ctx, token, team.GitLabGroupID, user.ID)
 	if err != nil || groupLevel < domain.AccessLevelMaintainer {
-		return nil, fmt.Errorf("forbidden: maintainer access required in team group")
+		return nil, fmt.Errorf("forbidden: maintainer or owner access required in team group")
+	}
+
+	// Проверяем права на GitLab-проект только если пользователь не Owner группы.
+	// Owner группы имеет полный доступ ко всем проектам внутри неё — отдельная
+	// проверка проекта избыточна и может упасть для group bot'ов.
+	if groupLevel < domain.AccessLevelOwner {
+		projectLevel, err := s.auth.GetProjectAccessLevel(ctx, token, repo.GitLabID, user.ID)
+		if err != nil || projectLevel < domain.AccessLevelMaintainer {
+			return nil, fmt.Errorf("forbidden: maintainer access required on gitlab project %d", repo.GitLabID)
+		}
 	}
 
 	repo.TeamID = team.ID

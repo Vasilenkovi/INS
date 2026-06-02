@@ -4,9 +4,8 @@ import (
 	"net/http"
 	"strings"
 
-	"standards-service/internal/domain"
-
 	"github.com/gin-gonic/gin"
+	"standards-service/internal/domain"
 )
 
 const (

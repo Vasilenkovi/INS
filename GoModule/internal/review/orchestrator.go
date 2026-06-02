@@ -9,7 +9,7 @@ import (
 )
 
 // Orchestrator координирует полный цикл анализа одного MR:
-// получение diff - LLM-анализ - публикация результатов.
+// получение diff_refs → получение diff → LLM-анализ → публикация результатов.
 type Orchestrator struct {
 	gitlab domain.GitLabPort
 	llm    domain.LLMPort
@@ -32,41 +32,49 @@ func NewOrchestrator(
 }
 
 // Run запускает полный цикл анализа для указанного MR.
+// codeStandard — контент стандарта из БД; пустая строка — LLM использует дефолты.
 // Возвращает ReviewResult, по которому CLI решает exit code.
-func (o *Orchestrator) Run(ctx context.Context, projectID, mrIID int) (*domain.ReviewResult, error) {
-	o.logger.Info("starting review", "project_id", projectID, "mr_iid", mrIID)
+func (o *Orchestrator) Run(ctx context.Context, projectID, mrIID int, codeStandard string) (*domain.ReviewResult, error) {
+	o.logger.Info("starting review",
+		"project_id", projectID,
+		"mr_iid", mrIID,
+		"has_standard", codeStandard != "",
+	)
 
-	// Получаем diff_refs для inline-позиционирования комментариев.
-	// Если GitLab ещё не обработал MR - продолжаем в fallback-режиме
+	// 1. Получаем diff_refs для inline-позиционирования комментариев.
+	//    Если GitLab ещё не обработал MR — продолжаем в fallback-режиме
+	//    (комментарии без привязки к строке).
 	refs, err := o.gitlab.GetMRDiffRefs(ctx, projectID, mrIID)
 	if err != nil {
 		o.logger.Warn("could not fetch diff_refs, inline comments will be posted as notes",
 			"error", err,
 		)
-		refs = domain.DiffRefs{} // Empty() == true - fallback в PostInlineComment
+		refs = domain.DiffRefs{} // Empty() == true → fallback в PostInlineComment
 	}
 
-	// Получаем diff файлов MR.
+	// 2. Получаем diff файлов MR.
 	diffs, err := o.gitlab.GetMRDiffs(ctx, projectID, mrIID)
 	if err != nil {
 		return nil, fmt.Errorf("orchestrator: get diffs: %w", err)
 	}
 	o.logger.Info("diffs fetched", "files", len(diffs))
 
-	// Анализируем каждый файл через LLM
-	// TODO: заменить на параллельный worker pool (после реализации LLM-модуля)
+	// 3. Анализируем каждый файл через LLM.
+	// TODO: заменить на параллельный worker pool после реализации LLM-модуля.
 	var allComments []domain.Comment
 	for _, diff := range diffs {
-		comments, err := o.llm.Analyze(ctx, diff, "")
+		comments, err := o.llm.Analyze(ctx, diff, codeStandard)
 		if err != nil {
 			o.logger.Warn("llm analyze failed, skipping file",
-				"file", diff.NewPath, "error", err)
+				"file", diff.NewPath,
+				"error", err,
+			)
 			continue
 		}
 		allComments = append(allComments, comments...)
 	}
 
-	// Формируем итоговый результат
+	// 4. Формируем итоговый результат.
 	result := buildResult(allComments)
 	o.logger.Info("review completed",
 		"verdict", result.Verdict,
@@ -75,9 +83,9 @@ func (o *Orchestrator) Run(ctx context.Context, projectID, mrIID int) (*domain.R
 		"minor", result.TotalByLevel[domain.SeverityMinor],
 	)
 
-	// Публикуем inline-комментарии
-	// refs передаётся в каждый вызов; если refs.Empty() - PostInlineComment
-	// переключится на fallback note.
+	// 5. Публикуем inline-комментарии.
+	//    refs передаётся в каждый вызов; если refs.Empty() — PostInlineComment
+	//    автоматически переключится на fallback note.
 	for _, c := range allComments {
 		if err := o.gitlab.PostInlineComment(ctx, projectID, mrIID, c, refs); err != nil {
 			o.logger.Warn("failed to post inline comment",
@@ -88,12 +96,12 @@ func (o *Orchestrator) Run(ctx context.Context, projectID, mrIID int) (*domain.R
 		}
 	}
 
-	// Публикуем summary
+	// 6. Публикуем summary.
 	if err := o.gitlab.PostSummaryComment(ctx, projectID, mrIID, result); err != nil {
 		o.logger.Warn("failed to post summary", "error", err)
 	}
 
-	// Генерируем и публикуем HTML-отчёт
+	// 7. Генерируем и публикуем HTML-отчёт.
 	html, err := o.report.Render(result)
 	if err != nil {
 		o.logger.Warn("failed to render report", "error", err)

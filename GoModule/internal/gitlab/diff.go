@@ -7,7 +7,7 @@ import (
 	"cr-assistant/internal/domain"
 )
 
-// mrDiffResponse ответ GitLab API на запрос diff MR.
+// mrDiffResponse — ответ GitLab API на запрос diff MR.
 // https://docs.gitlab.com/ee/api/merge_requests.html#get-single-mr-changes
 type mrDiffResponse struct {
 	Changes []fileChange `json:"changes"`
