@@ -1,0 +1,37 @@
+version: '3.8'
+
+services:
+  # Бэкенд на Go
+  backend:
+    image: sam228269/tool:latest 
+    ports:
+      - "8080:8080"
+    environment:
+      - DB_URL=postgres://${DB_USER}:${DB_PASSWORD}@db:5432/${DB_NAME}
+      - LLM_GATEWAY_URL=http://processor:8080 
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # База данных 
+  db:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME}
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Python обработчик
+  processor:
+    image: sam228269/tool-processor:latest 
+    ports:
+      - "8081:8080"
+    environment:
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
