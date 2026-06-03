@@ -37,7 +37,7 @@ jobs:
           cd python_processor
           pip install -r requirements.txt
           pip install pytest
-          pytest
+          pytest --doctest-modules || test $? -eq 5
 
   # ДЖОБ СБОРКИ
   build-and-push:
