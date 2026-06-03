@@ -1,4 +1,4 @@
-from python_processor.src.config_loader import CompleteUniversityStandard
+from src.config_loader import CompleteUniversityStandard
 
 
 class PromptBuilder:
