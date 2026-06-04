@@ -14,19 +14,15 @@ import (
 // =============================================================================
 
 type AuthMock struct {
-	mu           sync.RWMutex
-	users        map[string]*domain.GitLabUser // token → user
-	groups       map[int]map[int]int           // groupID → userID → level
-	projects     map[int]map[int]int           // projectID → userID → level
-	gitLabGroups map[int]*domain.GitLabGroup
+	mu       sync.RWMutex
+	users    map[string]*domain.GitLabUser // token → user
+	projects map[int]map[int]int           // projectID → userID → level
 }
 
 func NewAuthMock() *AuthMock {
 	return &AuthMock{
-		users:        make(map[string]*domain.GitLabUser),
-		groups:       make(map[int]map[int]int),
-		projects:     make(map[int]map[int]int),
-		gitLabGroups: make(map[int]*domain.GitLabGroup),
+		users:    make(map[string]*domain.GitLabUser),
+		projects: make(map[int]map[int]int),
 	}
 }
 
@@ -36,15 +32,6 @@ func (m *AuthMock) SetUser(token string, user domain.GitLabUser) {
 	m.users[token] = &user
 }
 
-func (m *AuthMock) SetGroupAccess(groupID, userID, level int) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.groups[groupID] == nil {
-		m.groups[groupID] = make(map[int]int)
-	}
-	m.groups[groupID][userID] = level
-}
-
 func (m *AuthMock) SetProjectAccess(projectID, userID, level int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -52,12 +39,6 @@ func (m *AuthMock) SetProjectAccess(projectID, userID, level int) {
 		m.projects[projectID] = make(map[int]int)
 	}
 	m.projects[projectID][userID] = level
-}
-
-func (m *AuthMock) SetGroup(g domain.GitLabGroup) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.gitLabGroups[g.ID] = &g
 }
 
 func (m *AuthMock) VerifyUser(ctx context.Context, token string) (*domain.GitLabUser, error) {
@@ -70,16 +51,6 @@ func (m *AuthMock) VerifyUser(ctx context.Context, token string) (*domain.GitLab
 	return u, nil
 }
 
-func (m *AuthMock) GetGroupAccessLevel(ctx context.Context, token string, groupID, userID int) (domain.AccessLevel, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	level := m.groups[groupID][userID]
-	if level == 0 {
-		return 0, fmt.Errorf("not found")
-	}
-	return domain.AccessLevel(level), nil
-}
-
 func (m *AuthMock) GetProjectAccessLevel(ctx context.Context, token string, projectID, userID int) (domain.AccessLevel, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -90,24 +61,12 @@ func (m *AuthMock) GetProjectAccessLevel(ctx context.Context, token string, proj
 	return domain.AccessLevel(level), nil
 }
 
-func (m *AuthMock) GetGroupByID(ctx context.Context, token string, groupID int) (*domain.GitLabGroup, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	g, ok := m.gitLabGroups[groupID]
-	if !ok {
-		return nil, fmt.Errorf("group %d not found", groupID)
-	}
-	return g, nil
-}
-
 func (m *AuthMock) VerifyJobToken(ctx context.Context, token string) error {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-
 	if _, ok := m.users[token]; !ok {
 		return fmt.Errorf("invalid job token")
 	}
-
 	return nil
 }
 
@@ -198,6 +157,90 @@ func (m *TeamRepoMock) Delete(ctx context.Context, id string) error {
 }
 
 // =============================================================================
+// RepositoryRepoMock
+// =============================================================================
+
+type RepositoryRepoMock struct {
+	mu       sync.RWMutex
+	repos    map[string]*domain.Repository // id → repo
+	byGitLab map[int]*domain.Repository    // gitlabID → repo
+	byTeam   map[string][]*domain.Repository
+}
+
+func NewRepositoryRepoMock() *RepositoryRepoMock {
+	return &RepositoryRepoMock{
+		repos:    make(map[string]*domain.Repository),
+		byGitLab: make(map[int]*domain.Repository),
+		byTeam:   make(map[string][]*domain.Repository),
+	}
+}
+
+func (m *RepositoryRepoMock) Create(ctx context.Context, r *domain.Repository) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if r.ID == "" {
+		r.ID = fmt.Sprintf("repo-%d", r.GitLabID)
+	}
+	cp := *r
+	m.repos[r.ID] = &cp
+	m.byGitLab[r.GitLabID] = &cp
+	m.byTeam[r.TeamID] = append(m.byTeam[r.TeamID], &cp)
+	return nil
+}
+
+func (m *RepositoryRepoMock) GetByID(ctx context.Context, id string) (*domain.Repository, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	r, ok := m.repos[id]
+	if !ok {
+		return nil, fmt.Errorf("repository %q not found", id)
+	}
+	cp := *r
+	return &cp, nil
+}
+
+func (m *RepositoryRepoMock) GetByGitLabID(ctx context.Context, gitlabID int) (*domain.Repository, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	r, ok := m.byGitLab[gitlabID]
+	if !ok {
+		return nil, fmt.Errorf("repository with gitlab_id %d not found", gitlabID)
+	}
+	cp := *r
+	return &cp, nil
+}
+
+func (m *RepositoryRepoMock) ListByTeam(ctx context.Context, teamID string) ([]*domain.Repository, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]*domain.Repository, 0)
+	for _, r := range m.byTeam[teamID] {
+		cp := *r
+		out = append(out, &cp)
+	}
+	return out, nil
+}
+
+func (m *RepositoryRepoMock) Delete(ctx context.Context, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	r, ok := m.repos[id]
+	if !ok {
+		return fmt.Errorf("repository %q not found", id)
+	}
+	delete(m.repos, id)
+	delete(m.byGitLab, r.GitLabID)
+	list := m.byTeam[r.TeamID]
+	for i, repo := range list {
+		if repo.ID == id {
+			m.byTeam[r.TeamID] = append(list[:i], list[i+1:]...)
+			break
+		}
+	}
+	return nil
+}
+
+// =============================================================================
 // CodeStandardRepoMock + StandardVersionRepoMock
 // =============================================================================
 
@@ -271,7 +314,6 @@ func (m *StandardVersionRepoMock) Create(ctx context.Context, v *domain.Standard
 	}
 
 	cp := *v
-
 	m.versions[v.ID] = &cp
 	m.byStd[v.CodeStandardID] = append(m.byStd[v.CodeStandardID], &cp)
 

@@ -16,20 +16,12 @@ import (
 
 // ActiveStandard — ответ standards-service для CI job.
 type ActiveStandard struct {
-	Preset      string `json:"preset"`
 	CustomRules string `json:"custom_rules"`
-	Language    string `json:"language"`
 	Version     int    `json:"version"`
 }
 
 // BuildPromptContext формирует строку стандарта для подстановки в промпт LLM.
 func (s *ActiveStandard) BuildPromptContext() string {
-	if s.Preset != "" && s.CustomRules != "" {
-		return fmt.Sprintf("Base preset: %s\n\nAdditional rules:\n%s", s.Preset, s.CustomRules)
-	}
-	if s.Preset != "" {
-		return fmt.Sprintf("Base preset: %s", s.Preset)
-	}
 	return s.CustomRules
 }
 
@@ -46,14 +38,11 @@ func (e *ErrNotFound) Error() string {
 // Client — HTTP-клиент для /internal/v1/ API standards-service.
 type Client struct {
 	baseURL    string
-	jobToken   string // CI_JOB_TOKEN — проставляется GitLab автоматически
+	jobToken   string // CI_JOB_TOKEN
 	httpClient *http.Client
 }
 
 // New создаёт клиент.
-//   - baseURL  — STANDARDS_SERVICE_URL, например http://standards-service:9090
-//   - jobToken — CI_JOB_TOKEN (GitLab проставляет автоматически в каждом job)
-//   - timeout  — таймаут одного HTTP-запроса
 func New(baseURL, jobToken string, timeout time.Duration) *Client {
 	return &Client{
 		baseURL:  baseURL,
@@ -65,9 +54,6 @@ func New(baseURL, jobToken string, timeout time.Duration) *Client {
 }
 
 // GetStandard запрашивает активный стандарт для GitLab-проекта.
-//
-// Возвращает *ErrNotFound если проект не зарегистрирован или стандарт не настроен.
-// В этом случае cr-assistant продолжает работу без стандарта.
 func (c *Client) GetStandard(ctx context.Context, gitlabProjectID int) (*ActiveStandard, error) {
 	url := fmt.Sprintf("%s/internal/v1/projects/%d/standard", c.baseURL, gitlabProjectID)
 

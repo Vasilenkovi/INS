@@ -9,36 +9,49 @@ import (
 	"standards-service/internal/testutil"
 )
 
-func setupStandardSvc() (*service.StandardService, *testutil.TeamRepoMock, *testutil.CodeStandardRepoMock, *testutil.StandardVersionRepoMock, *testutil.AuthMock) {
+func setupStandardSvc() (
+	*service.StandardService,
+	*testutil.TeamRepoMock,
+	*testutil.RepositoryRepoMock,
+	*testutil.CodeStandardRepoMock,
+	*testutil.StandardVersionRepoMock,
+	*testutil.AuthMock,
+) {
 	auth := testutil.NewAuthMock()
 	teams := testutil.NewTeamRepoMock()
+	repos := testutil.NewRepositoryRepoMock()
 	standards := testutil.NewCodeStandardRepoMock()
 	versions := testutil.NewStandardVersionRepoMock()
-	svc := service.NewStandardService(standards, versions, teams, auth)
-	return svc, teams, standards, versions, auth
+	checker := newChecker(auth)
+	svc := service.NewStandardService(standards, versions, teams, repos, checker, auth)
+	return svc, teams, repos, standards, versions, auth
 }
 
-// seedTeam создаёт команду напрямую в репо (без проверки прав).
-func seedTeam(teams *testutil.TeamRepoMock) *domain.Team {
+// seedTeamWithRepo создаёт команду с репозиторием напрямую в репо (без проверки прав).
+func seedTeamWithRepo(teams *testutil.TeamRepoMock, repos *testutil.RepositoryRepoMock) *domain.Team {
 	t := &domain.Team{
-		ID:            "team-uuid-1",
-		Name:          "Core Backend",
-		Slug:          "core-backend",
-		GitLabGroupID: groupID,
+		ID:   "team-uuid-1",
+		Name: "Core Backend",
+		Slug: "core-backend",
 	}
 	teams.Create(context.Background(), t)
+	repos.Create(context.Background(), &domain.Repository{
+		ID:       "repo-1",
+		TeamID:   t.ID,
+		GitLabID: projectID,
+		Name:     "auth-service",
+	})
 	return t
 }
 
 func TestStandardService_Upload_CreatesVersionOne(t *testing.T) {
-	svc, teams, _, _, auth := setupStandardSvc()
+	svc, teams, repos, _, _, auth := setupStandardSvc()
 	seedAuth(auth)
-	seedTeam(teams)
+	seedTeamWithRepo(teams, repos)
 
 	version, err := svc.Upload(context.Background(), "core-backend", &domain.StandardVersion{
-		Preset:   "PEP8",
-		Language: "ru",
-		Comment:  "Initial standard",
+		CustomRules: "## Rules\n- Use gofmt",
+		Comment:     "Initial standard",
 	}, maintainerToken)
 
 	if err != nil {
@@ -56,16 +69,17 @@ func TestStandardService_Upload_CreatesVersionOne(t *testing.T) {
 }
 
 func TestStandardService_Upload_IncrementsVersion(t *testing.T) {
-	svc, teams, _, _, auth := setupStandardSvc()
+	svc, teams, repos, _, _, auth := setupStandardSvc()
 	seedAuth(auth)
-	seedTeam(teams)
+	seedTeamWithRepo(teams, repos)
 
 	_, _ = svc.Upload(context.Background(), "core-backend", &domain.StandardVersion{
-		Preset: "PEP8", Language: "ru",
+		CustomRules: "## Rules v1",
 	}, maintainerToken)
 
 	v2, err := svc.Upload(context.Background(), "core-backend", &domain.StandardVersion{
-		CustomRules: "## New rules", Language: "ru", Comment: "Added custom rules",
+		CustomRules: "## Rules v2",
+		Comment:     "Added custom rules",
 	}, maintainerToken)
 
 	if err != nil {
@@ -77,12 +91,12 @@ func TestStandardService_Upload_IncrementsVersion(t *testing.T) {
 }
 
 func TestStandardService_Upload_DeveloperForbidden(t *testing.T) {
-	svc, teams, _, _, auth := setupStandardSvc()
+	svc, teams, repos, _, _, auth := setupStandardSvc()
 	seedAuth(auth)
-	seedTeam(teams)
+	seedTeamWithRepo(teams, repos)
 
 	_, err := svc.Upload(context.Background(), "core-backend", &domain.StandardVersion{
-		Preset: "PEP8", Language: "ru",
+		CustomRules: "## Rules",
 	}, developerToken)
 
 	if err == nil {
@@ -90,28 +104,49 @@ func TestStandardService_Upload_DeveloperForbidden(t *testing.T) {
 	}
 }
 
-func TestStandardService_Upload_RequiresPresetOrCustomRules(t *testing.T) {
-	svc, teams, _, _, auth := setupStandardSvc()
+func TestStandardService_Upload_RequiresCustomRules(t *testing.T) {
+	svc, teams, repos, _, _, auth := setupStandardSvc()
 	seedAuth(auth)
-	seedTeam(teams)
+	seedTeamWithRepo(teams, repos)
 
 	_, err := svc.Upload(context.Background(), "core-backend", &domain.StandardVersion{
-		Language: "ru",
-		// Ни Preset, ни CustomRules не заданы
+		// CustomRules не задан
 	}, maintainerToken)
 
 	if err == nil {
-		t.Error("expected validation error when both preset and custom_rules are empty")
+		t.Error("expected validation error when custom_rules is empty")
+	}
+}
+
+func TestStandardService_Upload_AutoActivates(t *testing.T) {
+	svc, teams, repos, _, _, auth := setupStandardSvc()
+	seedAuth(auth)
+	seedTeamWithRepo(teams, repos)
+
+	uploaded, err := svc.Upload(context.Background(), "core-backend", &domain.StandardVersion{
+		CustomRules: "## Rules",
+	}, maintainerToken)
+	if err != nil {
+		t.Fatalf("Upload: %v", err)
+	}
+
+	// Сразу после загрузки — новая версия должна быть активной
+	active, err := svc.GetActive(context.Background(), "core-backend", developerToken)
+	if err != nil {
+		t.Fatalf("GetActive() error = %v", err)
+	}
+	if active.ID != uploaded.ID {
+		t.Errorf("active version ID = %q, want %q", active.ID, uploaded.ID)
 	}
 }
 
 func TestStandardService_GetActive_AfterUpload(t *testing.T) {
-	svc, teams, _, _, auth := setupStandardSvc()
+	svc, teams, repos, _, _, auth := setupStandardSvc()
 	seedAuth(auth)
-	seedTeam(teams)
+	seedTeamWithRepo(teams, repos)
 
 	uploaded, err := svc.Upload(context.Background(), "core-backend", &domain.StandardVersion{
-		Preset: "PEP8", Language: "ru",
+		CustomRules: "## Rules",
 	}, maintainerToken)
 	if err != nil {
 		t.Fatalf("Upload: %v", err)
@@ -126,16 +161,32 @@ func TestStandardService_GetActive_AfterUpload(t *testing.T) {
 	}
 }
 
-func TestStandardService_SetActiveVersion_Maintainer(t *testing.T) {
-	svc, teams, _, _, auth := setupStandardSvc()
+func TestStandardService_GetActive_AllAuthorizedCanRead(t *testing.T) {
+	svc, teams, repos, _, _, auth := setupStandardSvc()
 	seedAuth(auth)
-	seedTeam(teams)
+	seedTeamWithRepo(teams, repos)
+
+	_, _ = svc.Upload(context.Background(), "core-backend", &domain.StandardVersion{
+		CustomRules: "## Rules",
+	}, maintainerToken)
+
+	// Developer может читать (MIN_READ_ACCESS_LEVEL=0)
+	_, err := svc.GetActive(context.Background(), "core-backend", developerToken)
+	if err != nil {
+		t.Errorf("developer should be able to read active standard, got: %v", err)
+	}
+}
+
+func TestStandardService_SetActiveVersion_Maintainer(t *testing.T) {
+	svc, teams, repos, _, _, auth := setupStandardSvc()
+	seedAuth(auth)
+	seedTeamWithRepo(teams, repos)
 
 	v1, _ := svc.Upload(context.Background(), "core-backend", &domain.StandardVersion{
-		Preset: "PEP8", Language: "ru",
+		CustomRules: "## Rules v1",
 	}, maintainerToken)
 	v2, _ := svc.Upload(context.Background(), "core-backend", &domain.StandardVersion{
-		CustomRules: "new rules", Language: "ru",
+		CustomRules: "## Rules v2",
 	}, maintainerToken)
 
 	// Откатываемся на v1
@@ -150,14 +201,15 @@ func TestStandardService_SetActiveVersion_Maintainer(t *testing.T) {
 	}
 }
 
-func TestStandardService_ListVersions_Developer(t *testing.T) {
-	svc, teams, _, _, auth := setupStandardSvc()
+func TestStandardService_ListVersions_AnyAuthUser(t *testing.T) {
+	svc, teams, repos, _, _, auth := setupStandardSvc()
 	seedAuth(auth)
-	seedTeam(teams)
+	seedTeamWithRepo(teams, repos)
 
-	svc.Upload(context.Background(), "core-backend", &domain.StandardVersion{Preset: "PEP8", Language: "ru"}, maintainerToken)
-	svc.Upload(context.Background(), "core-backend", &domain.StandardVersion{CustomRules: "rules", Language: "ru"}, maintainerToken)
+	svc.Upload(context.Background(), "core-backend", &domain.StandardVersion{CustomRules: "## v1"}, maintainerToken)
+	svc.Upload(context.Background(), "core-backend", &domain.StandardVersion{CustomRules: "## v2"}, maintainerToken)
 
+	// Developer может получить список версий
 	versions, err := svc.ListVersions(context.Background(), "core-backend", developerToken)
 	if err != nil {
 		t.Fatalf("ListVersions() error = %v", err)

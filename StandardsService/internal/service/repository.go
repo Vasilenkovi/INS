@@ -8,24 +8,23 @@ import (
 )
 
 type RepositoryService struct {
-	repos domain.RepositoryRepository
-	teams domain.TeamRepository
-	auth  domain.AuthPort
+	repos   domain.RepositoryRepository
+	teams   domain.TeamRepository
+	checker *domain.AccessChecker
+	auth    domain.AuthPort
 }
 
 func NewRepositoryService(
 	repos domain.RepositoryRepository,
 	teams domain.TeamRepository,
+	checker *domain.AccessChecker,
 	auth domain.AuthPort,
 ) *RepositoryService {
-	return &RepositoryService{repos: repos, teams: teams, auth: auth}
+	return &RepositoryService{repos: repos, teams: teams, checker: checker, auth: auth}
 }
 
 // Add привязывает GitLab-проект к команде.
-// Требует: пользователь — Maintainer или Owner группы команды.
-// Проверка прав на сам GitLab-проект опциональна: если пользователь является
-// group bot'ом или унаследованным членом без прямого доступа к проекту —
-// достаточно прав на уровне группы.
+// Пользователь должен обладать write-доступом в добавляемом проекте.
 func (s *RepositoryService) Add(ctx context.Context, teamSlug string, repo *domain.Repository, token string) (*domain.Repository, error) {
 	user, err := s.auth.VerifyUser(ctx, token)
 	if err != nil {
@@ -37,21 +36,8 @@ func (s *RepositoryService) Add(ctx context.Context, teamSlug string, repo *doma
 		return nil, fmt.Errorf("team not found: %w", err)
 	}
 
-	// Проверяем права в группе команды — Maintainer (40) или Owner (50).
-	// Owner > Maintainer числово, поэтому одна проверка покрывает оба случая.
-	groupLevel, err := s.auth.GetGroupAccessLevel(ctx, token, team.GitLabGroupID, user.ID)
-	if err != nil || groupLevel < domain.AccessLevelMaintainer {
-		return nil, fmt.Errorf("forbidden: maintainer or owner access required in team group")
-	}
-
-	// Проверяем права на GitLab-проект только если пользователь не Owner группы.
-	// Owner группы имеет полный доступ ко всем проектам внутри неё — отдельная
-	// проверка проекта избыточна и может упасть для group bot'ов.
-	if groupLevel < domain.AccessLevelOwner {
-		projectLevel, err := s.auth.GetProjectAccessLevel(ctx, token, repo.GitLabID, user.ID)
-		if err != nil || projectLevel < domain.AccessLevelMaintainer {
-			return nil, fmt.Errorf("forbidden: maintainer access required on gitlab project %d", repo.GitLabID)
-		}
+	if err := s.checker.CheckWrite(ctx, token, repo.GitLabID, user.ID); err != nil {
+		return nil, err
 	}
 
 	repo.TeamID = team.ID
@@ -67,10 +53,10 @@ func (s *RepositoryService) Add(ctx context.Context, teamSlug string, repo *doma
 	return repo, nil
 }
 
-// ListByTeam возвращает репозитории команды. Доступно Developer и выше.
+// ListByTeam возвращает репозитории команды.
+// Чтение доступно всем авторизованным (MIN_READ_ACCESS_LEVEL=0 по умолчанию).
 func (s *RepositoryService) ListByTeam(ctx context.Context, teamSlug string, token string) ([]*domain.Repository, error) {
-	user, err := s.auth.VerifyUser(ctx, token)
-	if err != nil {
+	if _, err := s.auth.VerifyUser(ctx, token); err != nil {
 		return nil, fmt.Errorf("unauthorized: %w", err)
 	}
 
@@ -79,29 +65,23 @@ func (s *RepositoryService) ListByTeam(ctx context.Context, teamSlug string, tok
 		return nil, err
 	}
 
-	level, err := s.auth.GetGroupAccessLevel(ctx, token, team.GitLabGroupID, user.ID)
-	if err != nil || level < domain.AccessLevelDeveloper {
-		return nil, fmt.Errorf("forbidden: developer access required")
-	}
-
 	return s.repos.ListByTeam(ctx, team.ID)
 }
 
-// Remove отвязывает репозиторий от команды. Требует Maintainer.
+// Remove отвязывает репозиторий от команды. Требует write-доступа в проекте.
 func (s *RepositoryService) Remove(ctx context.Context, teamSlug, repoID string, token string) error {
 	user, err := s.auth.VerifyUser(ctx, token)
 	if err != nil {
 		return fmt.Errorf("unauthorized: %w", err)
 	}
 
-	team, err := s.teams.GetBySlug(ctx, teamSlug)
+	repo, err := s.repos.GetByID(ctx, repoID)
 	if err != nil {
-		return err
+		return fmt.Errorf("repository not found: %w", err)
 	}
 
-	level, err := s.auth.GetGroupAccessLevel(ctx, token, team.GitLabGroupID, user.ID)
-	if err != nil || level < domain.AccessLevelMaintainer {
-		return fmt.Errorf("forbidden: maintainer access required")
+	if err := s.checker.CheckWrite(ctx, token, repo.GitLabID, user.ID); err != nil {
+		return err
 	}
 
 	return s.repos.Delete(ctx, repoID)

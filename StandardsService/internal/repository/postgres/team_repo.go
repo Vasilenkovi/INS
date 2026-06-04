@@ -25,10 +25,9 @@ func (r *TeamRepo) Create(ctx context.Context, team *domain.Team) error {
 	team.UpdatedAt = time.Now()
 
 	_, err := r.db.ExecContext(ctx, `
-		INSERT INTO teams (id, name, slug, description, gitlab_group_id, gitlab_group_path, created_by, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+		INSERT INTO teams (id, name, slug, description, created_by, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)`,
 		team.ID, team.Name, team.Slug, team.Description,
-		team.GitLabGroupID, team.GitLabGroupPath,
 		team.CreatedBy, team.CreatedAt, team.UpdatedAt,
 	)
 	if err != nil {
@@ -40,11 +39,10 @@ func (r *TeamRepo) Create(ctx context.Context, team *domain.Team) error {
 func (r *TeamRepo) GetBySlug(ctx context.Context, slug string) (*domain.Team, error) {
 	team := &domain.Team{}
 	err := r.db.QueryRowContext(ctx, `
-		SELECT id, name, slug, description, gitlab_group_id, gitlab_group_path, created_by, created_at, updated_at
+		SELECT id, name, slug, description, created_by, created_at, updated_at
 		FROM teams WHERE slug = $1`, slug,
 	).Scan(
 		&team.ID, &team.Name, &team.Slug, &team.Description,
-		&team.GitLabGroupID, &team.GitLabGroupPath,
 		&team.CreatedBy, &team.CreatedAt, &team.UpdatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -59,11 +57,10 @@ func (r *TeamRepo) GetBySlug(ctx context.Context, slug string) (*domain.Team, er
 func (r *TeamRepo) GetByID(ctx context.Context, id string) (*domain.Team, error) {
 	team := &domain.Team{}
 	err := r.db.QueryRowContext(ctx, `
-		SELECT id, name, slug, description, gitlab_group_id, gitlab_group_path, created_by, created_at, updated_at
+		SELECT id, name, slug, description, created_by, created_at, updated_at
 		FROM teams WHERE id = $1`, id,
 	).Scan(
 		&team.ID, &team.Name, &team.Slug, &team.Description,
-		&team.GitLabGroupID, &team.GitLabGroupPath,
 		&team.CreatedBy, &team.CreatedAt, &team.UpdatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -77,7 +74,7 @@ func (r *TeamRepo) GetByID(ctx context.Context, id string) (*domain.Team, error)
 
 func (r *TeamRepo) List(ctx context.Context) ([]*domain.Team, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT id, name, slug, description, gitlab_group_id, gitlab_group_path, created_by, created_at, updated_at
+		SELECT id, name, slug, description, created_by, created_at, updated_at
 		FROM teams ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, fmt.Errorf("team list: %w", err)
@@ -89,7 +86,6 @@ func (r *TeamRepo) List(ctx context.Context) ([]*domain.Team, error) {
 		t := &domain.Team{}
 		if err := rows.Scan(
 			&t.ID, &t.Name, &t.Slug, &t.Description,
-			&t.GitLabGroupID, &t.GitLabGroupPath,
 			&t.CreatedBy, &t.CreatedAt, &t.UpdatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("team list scan: %w", err)

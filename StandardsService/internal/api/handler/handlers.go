@@ -25,10 +25,12 @@ func NewTeamHandler(svc *service.TeamService) *TeamHandler {
 // POST /api/v1/teams
 func (h *TeamHandler) Create(c *gin.Context) {
 	var req struct {
-		Name          string `json:"name"           binding:"required"`
-		Slug          string `json:"slug"           binding:"required"`
-		Description   string `json:"description"`
-		GitLabGroupID int    `json:"gitlab_group_id" binding:"required"`
+		Name            string `json:"name"              binding:"required"`
+		Slug            string `json:"slug"              binding:"required"`
+		Description     string `json:"description"`
+		GitLabProjectID int    `json:"gitlab_project_id" binding:"required"`
+		RepoName        string `json:"repo_name"         binding:"required"`
+		RepoFullPath    string `json:"repo_full_path"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -36,11 +38,10 @@ func (h *TeamHandler) Create(c *gin.Context) {
 	}
 
 	team, err := h.svc.Create(c.Request.Context(), &domain.Team{
-		Name:          req.Name,
-		Slug:          req.Slug,
-		Description:   req.Description,
-		GitLabGroupID: req.GitLabGroupID,
-	}, middleware.GetToken(c))
+		Name:        req.Name,
+		Slug:        req.Slug,
+		Description: req.Description,
+	}, req.GitLabProjectID, req.RepoName, req.RepoFullPath, middleware.GetToken(c))
 	if err != nil {
 		respondErr(c, err)
 		return
@@ -112,10 +113,9 @@ func NewRepositoryHandler(svc *service.RepositoryService) *RepositoryHandler {
 // POST /api/v1/teams/:slug/repos
 func (h *RepositoryHandler) Add(c *gin.Context) {
 	var req struct {
-		GitLabID int      `json:"gitlab_project_id" binding:"required"`
-		Name     string   `json:"name"              binding:"required"`
-		FullPath string   `json:"full_path"`
-		Excludes []string `json:"excludes"`
+		GitLabID int    `json:"gitlab_project_id" binding:"required"`
+		Name     string `json:"name"              binding:"required"`
+		FullPath string `json:"full_path"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -126,7 +126,6 @@ func (h *RepositoryHandler) Add(c *gin.Context) {
 		GitLabID: req.GitLabID,
 		Name:     req.Name,
 		FullPath: req.FullPath,
-		Excludes: req.Excludes,
 	}, middleware.GetToken(c))
 	if err != nil {
 		respondErr(c, err)
@@ -169,9 +168,7 @@ func NewStandardHandler(svc *service.StandardService) *StandardHandler {
 // POST /api/v1/teams/:slug/standards
 func (h *StandardHandler) Upload(c *gin.Context) {
 	var req struct {
-		Preset      string `json:"preset"`
-		CustomRules string `json:"custom_rules"`
-		Language    string `json:"language"  binding:"required"`
+		CustomRules string `json:"custom_rules" binding:"required"`
 		Comment     string `json:"comment"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -180,9 +177,7 @@ func (h *StandardHandler) Upload(c *gin.Context) {
 	}
 
 	version, err := h.svc.Upload(c.Request.Context(), c.Param("slug"), &domain.StandardVersion{
-		Preset:      req.Preset,
 		CustomRules: req.CustomRules,
-		Language:    req.Language,
 		Comment:     req.Comment,
 	}, middleware.GetToken(c))
 	if err != nil {
@@ -226,8 +221,6 @@ func (h *StandardHandler) Activate(c *gin.Context) {
 // helpers
 // =============================================================================
 
-// respondErr отображает ошибки сервисного слоя на HTTP-статусы.
-// Простая эвристика: unauthorized/forbidden → 401/403, остальное → 500.
 func respondErr(c *gin.Context, err error) {
 	msg := err.Error()
 	switch {
