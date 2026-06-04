@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"standards-service/internal/domain"
@@ -26,10 +25,10 @@ func (r *RepositoryRepo) Create(ctx context.Context, repo *domain.Repository) er
 	repo.CreatedAt = time.Now()
 
 	_, err := r.db.ExecContext(ctx, `
-		INSERT INTO repositories (id, team_id, gitlab_id, name, full_path, excludes, added_by, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+		INSERT INTO repositories (id, team_id, gitlab_id, name, full_path, added_by, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)`,
 		repo.ID, repo.TeamID, repo.GitLabID, repo.Name, repo.FullPath,
-		joinExcludes(repo.Excludes), repo.AddedBy, repo.CreatedAt,
+		repo.AddedBy, repo.CreatedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("repository create: %w", err)
@@ -39,20 +38,20 @@ func (r *RepositoryRepo) Create(ctx context.Context, repo *domain.Repository) er
 
 func (r *RepositoryRepo) GetByID(ctx context.Context, id string) (*domain.Repository, error) {
 	return r.scan(r.db.QueryRowContext(ctx, `
-		SELECT id, team_id, gitlab_id, name, full_path, excludes, added_by, created_at
+		SELECT id, team_id, gitlab_id, name, full_path, added_by, created_at
 		FROM repositories WHERE id = $1`, id))
 }
 
 func (r *RepositoryRepo) GetByGitLabID(ctx context.Context, gitlabID int) (*domain.Repository, error) {
 	return r.scan(r.db.QueryRowContext(ctx, `
-		SELECT id, team_id, gitlab_id, name, full_path, excludes, added_by, created_at
+		SELECT id, team_id, gitlab_id, name, full_path, added_by, created_at
 		FROM repositories WHERE gitlab_id = $1`, gitlabID))
 }
 
 func (r *RepositoryRepo) ListByTeam(ctx context.Context, teamID string) ([]*domain.Repository, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT id, team_id, gitlab_id, name, full_path, excludes, added_by, created_at
-		FROM repositories WHERE team_id = $1 ORDER BY created_at DESC`, teamID)
+		SELECT id, team_id, gitlab_id, name, full_path, added_by, created_at
+		FROM repositories WHERE team_id = $1 ORDER BY created_at ASC`, teamID)
 	if err != nil {
 		return nil, fmt.Errorf("repository list: %w", err)
 	}
@@ -60,15 +59,13 @@ func (r *RepositoryRepo) ListByTeam(ctx context.Context, teamID string) ([]*doma
 
 	var repos []*domain.Repository
 	for rows.Next() {
-		var excludes string
 		repo := &domain.Repository{}
 		if err := rows.Scan(
 			&repo.ID, &repo.TeamID, &repo.GitLabID, &repo.Name,
-			&repo.FullPath, &excludes, &repo.AddedBy, &repo.CreatedAt,
+			&repo.FullPath, &repo.AddedBy, &repo.CreatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("repository list scan: %w", err)
 		}
-		repo.Excludes = splitExcludes(excludes)
 		repos = append(repos, repo)
 	}
 	return repos, rows.Err()
@@ -81,10 +78,9 @@ func (r *RepositoryRepo) Delete(ctx context.Context, id string) error {
 
 func (r *RepositoryRepo) scan(row *sql.Row) (*domain.Repository, error) {
 	repo := &domain.Repository{}
-	var excludes string
 	err := row.Scan(
 		&repo.ID, &repo.TeamID, &repo.GitLabID, &repo.Name,
-		&repo.FullPath, &excludes, &repo.AddedBy, &repo.CreatedAt,
+		&repo.FullPath, &repo.AddedBy, &repo.CreatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("repository not found")
@@ -92,15 +88,5 @@ func (r *RepositoryRepo) scan(row *sql.Row) (*domain.Repository, error) {
 	if err != nil {
 		return nil, fmt.Errorf("repository scan: %w", err)
 	}
-	repo.Excludes = splitExcludes(excludes)
 	return repo, nil
-}
-
-// excludes хранятся как строка разделённая запятой — просто и без зависимостей.
-func joinExcludes(ex []string) string { return strings.Join(ex, ",") }
-func splitExcludes(s string) []string {
-	if s == "" {
-		return nil
-	}
-	return strings.Split(s, ",")
 }

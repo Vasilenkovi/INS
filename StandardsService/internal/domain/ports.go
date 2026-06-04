@@ -1,6 +1,9 @@
 package domain
 
-import "context"
+import (
+	"context"
+	"fmt"
+)
 
 // =============================================================================
 // Repository ports
@@ -24,7 +27,6 @@ type RepositoryRepository interface {
 }
 
 type CodeStandardRepository interface {
-	// Upsert создаёт стандарт для команды если его нет, иначе возвращает существующий.
 	Upsert(ctx context.Context, standard *CodeStandard) (*CodeStandard, error)
 	GetByTeamID(ctx context.Context, teamID string) (*CodeStandard, error)
 	SetActiveVersion(ctx context.Context, standardID string, versionID string) error
@@ -35,7 +37,6 @@ type StandardVersionRepository interface {
 	GetByID(ctx context.Context, id string) (*StandardVersion, error)
 	GetActive(ctx context.Context, standardID string) (*StandardVersion, error)
 	ListByStandard(ctx context.Context, standardID string) ([]*StandardVersion, error)
-	// GetNextVersion возвращает следующий номер версии для стандарта.
 	GetNextVersion(ctx context.Context, standardID string) (int, error)
 }
 
@@ -61,30 +62,48 @@ type GitLabUser struct {
 	Name     string
 }
 
-// GitLabGroup — группа GitLab с уровнем доступа текущего пользователя.
-type GitLabGroup struct {
-	ID          int
-	Name        string
-	FullPath    string
-	AccessLevel AccessLevel
-}
-
 // AuthPort — проверка прав через GitLab API.
 type AuthPort interface {
-	// VerifyUser проверяет PAT и возвращает пользователя.
 	VerifyUser(ctx context.Context, token string) (*GitLabUser, error)
-
-	// VerifyJobToken проверяет что токен является валидным CI_JOB_TOKEN.
-	// Используется CI job'ами (cr-assistant) — не требует PAT.
-	// GET /api/v4/job — возвращает 200 если токен живой.
 	VerifyJobToken(ctx context.Context, token string) error
-
-	// GetGroupAccessLevel возвращает уровень доступа пользователя в группе.
-	GetGroupAccessLevel(ctx context.Context, token string, groupID, userID int) (AccessLevel, error)
-
-	// GetProjectAccessLevel возвращает уровень доступа пользователя в проекте.
 	GetProjectAccessLevel(ctx context.Context, token string, projectID, userID int) (AccessLevel, error)
+}
 
-	// GetGroupByID возвращает информацию о группе GitLab.
-	GetGroupByID(ctx context.Context, token string, groupID int) (*GitLabGroup, error)
+// =============================================================================
+// AccessChecker — единый сервис проверки прав через GitLab Project
+// =============================================================================
+
+type AccessChecker struct {
+	auth          AuthPort
+	minReadLevel  AccessLevel
+	minWriteLevel AccessLevel
+}
+
+func NewAccessChecker(auth AuthPort, minReadLevel, minWriteLevel AccessLevel) *AccessChecker {
+	return &AccessChecker{
+		auth:          auth,
+		minReadLevel:  minReadLevel,
+		minWriteLevel: minWriteLevel,
+	}
+}
+
+// CheckRead проверяет право на чтение. При minReadLevel == 0 доступно всем авторизованным.
+func (a *AccessChecker) CheckRead(ctx context.Context, token string, projectID, userID int) error {
+	if a.minReadLevel == 0 {
+		return nil
+	}
+	level, err := a.auth.GetProjectAccessLevel(ctx, token, projectID, userID)
+	if err != nil || level < a.minReadLevel {
+		return fmt.Errorf("forbidden: read access requires level %d in project %d", a.minReadLevel, projectID)
+	}
+	return nil
+}
+
+// CheckWrite проверяет право на запись в проекте.
+func (a *AccessChecker) CheckWrite(ctx context.Context, token string, projectID, userID int) error {
+	level, err := a.auth.GetProjectAccessLevel(ctx, token, projectID, userID)
+	if err != nil || level < a.minWriteLevel {
+		return fmt.Errorf("forbidden: write access requires level %d in project %d", a.minWriteLevel, projectID)
+	}
+	return nil
 }

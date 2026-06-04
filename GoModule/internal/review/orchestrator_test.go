@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"cr-assistant/internal/codereview"
 	"cr-assistant/internal/domain"
 	"cr-assistant/internal/gitlab"
 	"cr-assistant/internal/llm"
@@ -21,7 +22,6 @@ const (
 	mrIID     = 3
 	jobToken  = "ci-job-token"
 	botToken  = "bot-pat-token"
-	userID    = 99
 )
 
 // newOrchestrator собирает оркестратор, направленный на mock-сервер.
@@ -31,7 +31,8 @@ func newOrchestrator(t *testing.T, srv *mockserver.Server) *review.Orchestrator 
 	glClient := gitlab.NewClient(srv.URL, jobToken, botToken, 10*time.Second, logger)
 	llmGateway := llm.NewGateway(srv.URL, 10*time.Second)
 	renderer := report.NewRenderer()
-	return review.NewOrchestrator(glClient, llmGateway, renderer, logger)
+	crLoader := codereview.NewLoader(srv.URL, jobToken, 10*time.Second)
+	return review.NewOrchestrator(glClient, llmGateway, renderer, crLoader, logger)
 }
 
 // baseMR возвращает MR с корректными diff_refs и одним изменённым файлом.
@@ -50,8 +51,8 @@ func baseMR() mockserver.MR {
 				Diff: `@@ -1,3 +1,5 @@
 +import os
 +PASSWORD='secret'
- def main():
-     pass
+def main():
+    pass
 `,
 			},
 		},
@@ -68,7 +69,6 @@ func TestOrchestrator_HappyPath(t *testing.T) {
 	srv := mockserver.New()
 	defer srv.Close()
 
-	// Проверка что сервер работает
 	resp, err := http.Get(srv.URL + "/health")
 	if err != nil {
 		t.Fatalf("mock server not responding: %v", err)
@@ -102,7 +102,6 @@ func TestOrchestrator_HappyPath(t *testing.T) {
 		t.Errorf("critical count = %d, want 1", result.TotalByLevel[domain.SeverityCritical])
 	}
 
-	// Проверяем что комментарии опубликованы в GitLab
 	comments := srv.GitLab.Comments(projectID, mrIID)
 	if len(comments) == 0 {
 		t.Error("expected comments to be posted to GitLab, got none")
@@ -115,7 +114,7 @@ func TestOrchestrator_NoIssues(t *testing.T) {
 	defer srv.Close()
 
 	srv.GitLab.SetMR(projectID, baseMR())
-	srv.LLM.SetComments(nil) // пустой ответ
+	srv.LLM.SetComments(nil)
 
 	orch := newOrchestrator(t, srv)
 	result, err := orch.Run(context.Background(), projectID, mrIID, "")
@@ -161,8 +160,53 @@ func TestOrchestrator_MultipleFiles(t *testing.T) {
 	}
 }
 
-// TestOrchestrator_LLMUnavailable — LLM возвращает 500, оркестратор продолжает
-// и публикует summary без замечаний (деградация без остановки).
+// TestOrchestrator_ExcludeFiles — файлы из .codereview.yml excludes не анализируются.
+func TestOrchestrator_ExcludeFiles(t *testing.T) {
+	srv := mockserver.New()
+	defer srv.Close()
+
+	mr := baseMR()
+	// Добавляем vendor файл, который должен быть исключён
+	mr.Diffs = append(mr.Diffs, mockserver.FileDiff{
+		OldPath: "vendor/lib/util.go",
+		NewPath: "vendor/lib/util.go",
+		Diff:    "@@ -0,0 +1 @@\n+package lib\n",
+	})
+	// Добавляем .pb.go файл
+	mr.Diffs = append(mr.Diffs, mockserver.FileDiff{
+		OldPath: "api/service.pb.go",
+		NewPath: "api/service.pb.go",
+		Diff:    "@@ -0,0 +1 @@\n+// generated\n",
+	})
+	srv.GitLab.SetMR(projectID, mr)
+
+	// Конфигурируем mock чтобы .codereview.yml возвращал excludes
+	srv.GitLab.SetCodeReviewConfig(`
+review:
+  block_on_critical: true
+files:
+  exclude:
+    - vendor/**
+    - "*.pb.go"
+`)
+
+	srv.LLM.SetComments([]mockserver.LLMComment{
+		{FilePath: "main.py", Line: 1, Severity: "minor", Message: "Style issue"},
+	})
+
+	orch := newOrchestrator(t, srv)
+	result, err := orch.Run(context.Background(), projectID, mrIID, "")
+
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	// Только main.py должен быть проанализирован
+	if got := len(result.Comments); got != 1 {
+		t.Errorf("comments count = %d, want 1 (vendor and pb.go should be excluded)", got)
+	}
+}
+
+// TestOrchestrator_LLMUnavailable — LLM возвращает 500, оркестратор продолжает.
 func TestOrchestrator_LLMUnavailable(t *testing.T) {
 	srv := mockserver.New()
 	defer srv.Close()
@@ -173,7 +217,6 @@ func TestOrchestrator_LLMUnavailable(t *testing.T) {
 	orch := newOrchestrator(t, srv)
 	result, err := orch.Run(context.Background(), projectID, mrIID, "")
 
-	// Оркестратор не должен падать при недоступности LLM
 	if err != nil {
 		t.Fatalf("Run() should not fail when LLM is down, got: %v", err)
 	}
@@ -182,14 +225,13 @@ func TestOrchestrator_LLMUnavailable(t *testing.T) {
 	}
 }
 
-// TestOrchestrator_EmptyDiffRefs — GitLab ещё не обработал MR,
-// diff_refs пустые → комментарии уходят как fallback notes.
+// TestOrchestrator_EmptyDiffRefs — GitLab ещё не обработал MR → fallback notes.
 func TestOrchestrator_EmptyDiffRefs(t *testing.T) {
 	srv := mockserver.New()
 	defer srv.Close()
 
 	mr := baseMR()
-	mr.DiffRefs = mockserver.DiffRefs{} // пустые SHA
+	mr.DiffRefs = mockserver.DiffRefs{}
 	srv.GitLab.SetMR(projectID, mr)
 	srv.LLM.SetComments([]mockserver.LLMComment{
 		{FilePath: "main.py", Line: 1, Severity: "major", Message: "Issue"},
@@ -201,7 +243,6 @@ func TestOrchestrator_EmptyDiffRefs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
-	// Комментарии всё равно опубликованы (как notes)
 	comments := srv.GitLab.Comments(projectID, mrIID)
 	if len(comments) == 0 {
 		t.Error("expected fallback notes to be posted")
@@ -213,7 +254,6 @@ func TestOrchestrator_EmptyDiffRefs(t *testing.T) {
 func TestOrchestrator_MRNotFound(t *testing.T) {
 	srv := mockserver.New()
 	defer srv.Close()
-	// MR не добавлен в mock
 
 	orch := newOrchestrator(t, srv)
 	_, err := orch.Run(context.Background(), projectID, 999, "")
@@ -223,7 +263,7 @@ func TestOrchestrator_MRNotFound(t *testing.T) {
 	}
 }
 
-// TestOrchestrator_SummaryAlwaysPosted — summary публикуется даже когда нет замечаний.
+// TestOrchestrator_SummaryAlwaysPosted — summary публикуется даже без замечаний.
 func TestOrchestrator_SummaryAlwaysPosted(t *testing.T) {
 	srv := mockserver.New()
 	defer srv.Close()
@@ -237,13 +277,11 @@ func TestOrchestrator_SummaryAlwaysPosted(t *testing.T) {
 		t.Fatalf("Run() error = %v", err)
 	}
 
-	// Минимум один комментарий — summary
 	comments := srv.GitLab.Comments(projectID, mrIID)
 	if len(comments) == 0 {
 		t.Error("summary comment should always be posted")
 	}
 
-	// Summary должен содержать вердикт
 	found := false
 	for _, c := range comments {
 		if contains(c, "Пройдено") || contains(c, "Требует исправления") {

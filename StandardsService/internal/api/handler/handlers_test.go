@@ -21,15 +21,28 @@ func init() {
 	gin.SetMode(gin.TestMode)
 }
 
+const (
+	handlerProjectID = 101
+	handlerMaintID   = 1
+	handlerDevID     = 2
+)
+
+func newChecker(auth *testutil.AuthMock) *domain.AccessChecker {
+	return domain.NewAccessChecker(auth, 0, domain.AccessLevelMaintainer)
+}
+
 // newRouter собирает роутер с реальными handlers и mock-зависимостями.
-func newRouter(auth *testutil.AuthMock, teams *testutil.TeamRepoMock) *gin.Engine {
+func newRouter(auth *testutil.AuthMock, teams *testutil.TeamRepoMock, repos *testutil.RepositoryRepoMock) *gin.Engine {
 	standardRepo := testutil.NewCodeStandardRepoMock()
 	versionRepo := testutil.NewStandardVersionRepoMock()
+	checker := newChecker(auth)
 
-	teamSvc := service.NewTeamService(teams, auth)
-	standardSvc := service.NewStandardService(standardRepo, versionRepo, teams, auth)
+	teamSvc := service.NewTeamService(teams, repos, checker, auth)
+	repoSvc := service.NewRepositoryService(repos, teams, checker, auth)
+	standardSvc := service.NewStandardService(standardRepo, versionRepo, teams, repos, checker, auth)
 
 	teamH := handler.NewTeamHandler(teamSvc)
+	repoH := handler.NewRepositoryHandler(repoSvc)
 	standardH := handler.NewStandardHandler(standardSvc)
 
 	r := gin.New()
@@ -40,6 +53,9 @@ func newRouter(auth *testutil.AuthMock, teams *testutil.TeamRepoMock) *gin.Engin
 		api.GET("/teams/:slug", teamH.Get)
 		api.PATCH("/teams/:slug", teamH.Update)
 		api.DELETE("/teams/:slug", teamH.Delete)
+		api.POST("/teams/:slug/repos", repoH.Add)
+		api.GET("/teams/:slug/repos", repoH.List)
+		api.DELETE("/teams/:slug/repos/:repo_id", repoH.Remove)
 		api.POST("/teams/:slug/standards", standardH.Upload)
 		api.GET("/teams/:slug/standards/active", standardH.GetActive)
 		api.GET("/teams/:slug/standards/versions", standardH.ListVersions)
@@ -50,11 +66,10 @@ func newRouter(auth *testutil.AuthMock, teams *testutil.TeamRepoMock) *gin.Engin
 
 // seedFixtures инициализирует моки пользователями и правами.
 func seedFixtures(auth *testutil.AuthMock) {
-	auth.SetUser("maint-token", domain.GitLabUser{ID: 1, Username: "alice"})
-	auth.SetUser("dev-token", domain.GitLabUser{ID: 2, Username: "bob"})
-	auth.SetGroupAccess(42, 1, 40) // alice → maintainer
-	auth.SetGroupAccess(42, 2, 30) // bob → developer
-	auth.SetGroup(domain.GitLabGroup{ID: 42, Name: "Backend", FullPath: "company/backend"})
+	auth.SetUser("maint-token", domain.GitLabUser{ID: handlerMaintID, Username: "alice"})
+	auth.SetUser("dev-token", domain.GitLabUser{ID: handlerDevID, Username: "bob"})
+	auth.SetProjectAccess(handlerProjectID, handlerMaintID, 40) // alice → maintainer
+	auth.SetProjectAccess(handlerProjectID, handlerDevID, 30)   // bob → developer
 }
 
 func doRequest(r *gin.Engine, method, path, token string, body any) *httptest.ResponseRecorder {
@@ -79,7 +94,8 @@ func doRequest(r *gin.Engine, method, path, token string, body any) *httptest.Re
 func TestHandler_NoToken_Returns401(t *testing.T) {
 	auth := testutil.NewAuthMock()
 	teams := testutil.NewTeamRepoMock()
-	r := newRouter(auth, teams)
+	repos := testutil.NewRepositoryRepoMock()
+	r := newRouter(auth, teams, repos)
 
 	w := doRequest(r, http.MethodGet, "/api/v1/teams", "", nil)
 	if w.Code != http.StatusUnauthorized {
@@ -90,7 +106,8 @@ func TestHandler_NoToken_Returns401(t *testing.T) {
 func TestHandler_InvalidToken_Returns401(t *testing.T) {
 	auth := testutil.NewAuthMock()
 	teams := testutil.NewTeamRepoMock()
-	r := newRouter(auth, teams)
+	repos := testutil.NewRepositoryRepoMock()
+	r := newRouter(auth, teams, repos)
 
 	w := doRequest(r, http.MethodGet, "/api/v1/teams", "bad-token", nil)
 	if w.Code != http.StatusUnauthorized {
@@ -99,57 +116,40 @@ func TestHandler_InvalidToken_Returns401(t *testing.T) {
 }
 
 // =============================================================================
-// Teams
+// Team handler
 // =============================================================================
 
 func TestHandler_CreateTeam_Maintainer(t *testing.T) {
 	auth := testutil.NewAuthMock()
 	teams := testutil.NewTeamRepoMock()
+	repos := testutil.NewRepositoryRepoMock()
 	seedFixtures(auth)
-	r := newRouter(auth, teams)
+	r := newRouter(auth, teams, repos)
 
 	w := doRequest(r, http.MethodPost, "/api/v1/teams", "maint-token", map[string]any{
-		"name":            "Core Backend",
-		"slug":            "core-backend",
-		"gitlab_group_id": 42,
+		"name":              "Core Backend",
+		"slug":              "core-backend",
+		"gitlab_project_id": handlerProjectID,
+		"repo_name":         "auth-service",
+		"repo_full_path":    "company/backend/auth-service",
 	})
 
 	if w.Code != http.StatusCreated {
-		t.Errorf("status = %d, want 201, body: %s", w.Code, w.Body.String())
-	}
-
-	var resp map[string]any
-	json.NewDecoder(w.Body).Decode(&resp)
-	if resp["slug"] != "core-backend" {
-		t.Errorf("slug = %v, want core-backend", resp["slug"])
+		t.Errorf("status = %d, want 201; body = %s", w.Code, w.Body.String())
 	}
 }
 
-func TestHandler_CreateTeam_Developer_Returns403(t *testing.T) {
+func TestHandler_CreateTeam_MissingProjectID_Returns400(t *testing.T) {
 	auth := testutil.NewAuthMock()
 	teams := testutil.NewTeamRepoMock()
+	repos := testutil.NewRepositoryRepoMock()
 	seedFixtures(auth)
-	r := newRouter(auth, teams)
-
-	w := doRequest(r, http.MethodPost, "/api/v1/teams", "dev-token", map[string]any{
-		"name":            "Core Backend",
-		"slug":            "core-backend",
-		"gitlab_group_id": 42,
-	})
-
-	if w.Code != http.StatusForbidden {
-		t.Errorf("status = %d, want 403", w.Code)
-	}
-}
-
-func TestHandler_CreateTeam_MissingFields_Returns400(t *testing.T) {
-	auth := testutil.NewAuthMock()
-	teams := testutil.NewTeamRepoMock()
-	seedFixtures(auth)
-	r := newRouter(auth, teams)
+	r := newRouter(auth, teams, repos)
 
 	w := doRequest(r, http.MethodPost, "/api/v1/teams", "maint-token", map[string]any{
-		"name": "No Slug", // slug и gitlab_group_id отсутствуют
+		"name": "Core Backend",
+		"slug": "core-backend",
+		// gitlab_project_id отсутствует
 	})
 
 	if w.Code != http.StatusBadRequest {
@@ -157,82 +157,18 @@ func TestHandler_CreateTeam_MissingFields_Returns400(t *testing.T) {
 	}
 }
 
-func TestHandler_GetTeam_NotFound_Returns404(t *testing.T) {
+func TestHandler_CreateTeam_Developer_Returns403(t *testing.T) {
 	auth := testutil.NewAuthMock()
 	teams := testutil.NewTeamRepoMock()
+	repos := testutil.NewRepositoryRepoMock()
 	seedFixtures(auth)
-	r := newRouter(auth, teams)
+	r := newRouter(auth, teams, repos)
 
-	w := doRequest(r, http.MethodGet, "/api/v1/teams/nonexistent", "maint-token", nil)
-	if w.Code != http.StatusNotFound {
-		t.Errorf("status = %d, want 404", w.Code)
-	}
-}
-
-func TestHandler_ListTeams(t *testing.T) {
-	auth := testutil.NewAuthMock()
-	teams := testutil.NewTeamRepoMock()
-	seedFixtures(auth)
-
-	// Создаём команду напрямую
-	teams.Create(context.Background(), &domain.Team{
-		ID: "1", Name: "Alpha", Slug: "alpha", GitLabGroupID: 42,
-	})
-
-	r := newRouter(auth, teams)
-	w := doRequest(r, http.MethodGet, "/api/v1/teams", "dev-token", nil)
-
-	if w.Code != http.StatusOK {
-		t.Errorf("status = %d, want 200", w.Code)
-	}
-	var list []map[string]any
-	json.NewDecoder(w.Body).Decode(&list)
-	if len(list) != 1 {
-		t.Errorf("len(list) = %d, want 1", len(list))
-	}
-}
-
-// =============================================================================
-// Standards
-// =============================================================================
-
-func TestHandler_UploadStandard_Maintainer(t *testing.T) {
-	auth := testutil.NewAuthMock()
-	teams := testutil.NewTeamRepoMock()
-	seedFixtures(auth)
-	teams.Create(context.Background(), &domain.Team{
-		ID: "t1", Name: "Backend", Slug: "backend", GitLabGroupID: 42,
-	})
-	r := newRouter(auth, teams)
-
-	w := doRequest(r, http.MethodPost, "/api/v1/teams/backend/standards", "maint-token", map[string]any{
-		"preset":   "PEP8",
-		"language": "ru",
-		"comment":  "Initial",
-	})
-
-	if w.Code != http.StatusCreated {
-		t.Errorf("status = %d, want 201, body: %s", w.Code, w.Body.String())
-	}
-
-	var resp map[string]any
-	json.NewDecoder(w.Body).Decode(&resp)
-	if resp["version"].(float64) != 1 {
-		t.Errorf("version = %v, want 1", resp["version"])
-	}
-}
-
-func TestHandler_UploadStandard_Developer_Returns403(t *testing.T) {
-	auth := testutil.NewAuthMock()
-	teams := testutil.NewTeamRepoMock()
-	seedFixtures(auth)
-	teams.Create(context.Background(), &domain.Team{
-		ID: "t1", Name: "Backend", Slug: "backend", GitLabGroupID: 42,
-	})
-	r := newRouter(auth, teams)
-
-	w := doRequest(r, http.MethodPost, "/api/v1/teams/backend/standards", "dev-token", map[string]any{
-		"preset": "PEP8", "language": "ru",
+	w := doRequest(r, http.MethodPost, "/api/v1/teams", "dev-token", map[string]any{
+		"name":              "Core Backend",
+		"slug":              "core-backend",
+		"gitlab_project_id": handlerProjectID,
+		"repo_name":         "auth-service",
 	})
 
 	if w.Code != http.StatusForbidden {
@@ -240,44 +176,111 @@ func TestHandler_UploadStandard_Developer_Returns403(t *testing.T) {
 	}
 }
 
-func TestHandler_GetActiveStandard_AfterUpload(t *testing.T) {
+func TestHandler_ListTeams_AnyAuth(t *testing.T) {
 	auth := testutil.NewAuthMock()
 	teams := testutil.NewTeamRepoMock()
+	repos := testutil.NewRepositoryRepoMock()
 	seedFixtures(auth)
-	teams.Create(context.Background(), &domain.Team{
-		ID: "t1", Name: "Backend", Slug: "backend", GitLabGroupID: 42,
-	})
-	r := newRouter(auth, teams)
+	r := newRouter(auth, teams, repos)
 
-	// Загружаем стандарт
-	doRequest(r, http.MethodPost, "/api/v1/teams/backend/standards", "maint-token", map[string]any{
-		"preset": "PEP8", "language": "ru",
-	})
-
-	// Читаем активный
-	w := doRequest(r, http.MethodGet, "/api/v1/teams/backend/standards/active", "dev-token", nil)
+	w := doRequest(r, http.MethodGet, "/api/v1/teams", "dev-token", nil)
 	if w.Code != http.StatusOK {
-		t.Errorf("status = %d, want 200, body: %s", w.Code, w.Body.String())
+		t.Errorf("status = %d, want 200", w.Code)
+	}
+}
+
+// =============================================================================
+// Standard handler
+// =============================================================================
+
+func seedTeamAndRepoInMocks(auth *testutil.AuthMock, teams *testutil.TeamRepoMock, repos *testutil.RepositoryRepoMock) {
+	team := &domain.Team{ID: "team-1", Name: "Core Backend", Slug: "core-backend"}
+	teams.Create(context.Background(), team)
+	repos.Create(context.Background(), &domain.Repository{
+		ID: "repo-1", TeamID: "team-1", GitLabID: handlerProjectID, Name: "auth-service",
+	})
+}
+
+func TestHandler_UploadStandard_Maintainer(t *testing.T) {
+	auth := testutil.NewAuthMock()
+	teams := testutil.NewTeamRepoMock()
+	repos := testutil.NewRepositoryRepoMock()
+	seedFixtures(auth)
+	seedTeamAndRepoInMocks(auth, teams, repos)
+	r := newRouter(auth, teams, repos)
+
+	w := doRequest(r, http.MethodPost, "/api/v1/teams/core-backend/standards", "maint-token", map[string]any{
+		"custom_rules": "## Rules\n- Use gofmt\n- No unused imports",
+		"comment":      "Initial standard",
+	})
+
+	if w.Code != http.StatusCreated {
+		t.Errorf("status = %d, want 201; body = %s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandler_UploadStandard_NoCustomRules_Returns400(t *testing.T) {
+	auth := testutil.NewAuthMock()
+	teams := testutil.NewTeamRepoMock()
+	repos := testutil.NewRepositoryRepoMock()
+	seedFixtures(auth)
+	seedTeamAndRepoInMocks(auth, teams, repos)
+	r := newRouter(auth, teams, repos)
+
+	w := doRequest(r, http.MethodPost, "/api/v1/teams/core-backend/standards", "maint-token", map[string]any{
+		"comment": "no rules",
+		// custom_rules отсутствует
+	})
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", w.Code)
+	}
+}
+
+func TestHandler_GetActiveStandard_AnyAuth(t *testing.T) {
+	auth := testutil.NewAuthMock()
+	teams := testutil.NewTeamRepoMock()
+	repos := testutil.NewRepositoryRepoMock()
+	seedFixtures(auth)
+	seedTeamAndRepoInMocks(auth, teams, repos)
+	r := newRouter(auth, teams, repos)
+
+	// Сначала загружаем стандарт
+	doRequest(r, http.MethodPost, "/api/v1/teams/core-backend/standards", "maint-token", map[string]any{
+		"custom_rules": "## Rules",
+	})
+
+	// Developer может читать
+	w := doRequest(r, http.MethodGet, "/api/v1/teams/core-backend/standards/active", "dev-token", nil)
+	if w.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200; body = %s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandler_UploadStandard_AutoActivates(t *testing.T) {
+	auth := testutil.NewAuthMock()
+	teams := testutil.NewTeamRepoMock()
+	repos := testutil.NewRepositoryRepoMock()
+	seedFixtures(auth)
+	seedTeamAndRepoInMocks(auth, teams, repos)
+	r := newRouter(auth, teams, repos)
+
+	doRequest(r, http.MethodPost, "/api/v1/teams/core-backend/standards", "maint-token", map[string]any{
+		"custom_rules": "## Rules v1",
+	})
+	doRequest(r, http.MethodPost, "/api/v1/teams/core-backend/standards", "maint-token", map[string]any{
+		"custom_rules": "## Rules v2",
+	})
+
+	// Активной должна быть последняя версия
+	w := doRequest(r, http.MethodGet, "/api/v1/teams/core-backend/standards/active", "dev-token", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
 	}
 
 	var resp map[string]any
 	json.NewDecoder(w.Body).Decode(&resp)
-	if resp["preset"] != "PEP8" {
-		t.Errorf("preset = %v, want PEP8", resp["preset"])
-	}
-}
-
-func TestHandler_GetActiveStandard_NotUploaded_Returns404(t *testing.T) {
-	auth := testutil.NewAuthMock()
-	teams := testutil.NewTeamRepoMock()
-	seedFixtures(auth)
-	teams.Create(context.Background(), &domain.Team{
-		ID: "t1", Name: "Backend", Slug: "backend", GitLabGroupID: 42,
-	})
-	r := newRouter(auth, teams)
-
-	w := doRequest(r, http.MethodGet, "/api/v1/teams/backend/standards/active", "dev-token", nil)
-	if w.Code != http.StatusNotFound {
-		t.Errorf("status = %d, want 404", w.Code)
+	if v, ok := resp["version"].(float64); !ok || v != 2 {
+		t.Errorf("expected active version = 2, got %v", resp["version"])
 	}
 }

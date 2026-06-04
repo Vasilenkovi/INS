@@ -12,6 +12,7 @@ import (
 	"standards-service/internal/auth"
 	"standards-service/internal/config"
 	"standards-service/internal/db"
+	"standards-service/internal/domain"
 	"standards-service/internal/repository/postgres"
 	"standards-service/internal/service"
 )
@@ -32,9 +33,7 @@ func run(logger *slog.Logger) error {
 		return err
 	}
 
-	// 2. Database — подключение и миграции
-	// MIGRATIONS_PATH можно переопределить через env (полезно в Docker/тестах).
-	// По умолчанию "file:///migrations" — абсолютный путь, совместимый со scratch-образом.
+	// 2. Database
 	migrationsPath := os.Getenv("MIGRATIONS_PATH")
 	if migrationsPath == "" {
 		migrationsPath = "file:///migrations"
@@ -62,19 +61,26 @@ func run(logger *slog.Logger) error {
 		time.Duration(cfg.GitLab.TimeoutSec)*time.Second,
 	)
 
-	// 5. Services
-	teamSvc := service.NewTeamService(teamRepo, gitlabAuth)
-	repoSvc := service.NewRepositoryService(repoRepo, teamRepo, gitlabAuth)
-	standardSvc := service.NewStandardService(standardRepo, versionRepo, teamRepo, gitlabAuth)
+	// 5. AccessChecker — единый сервис проверки прав через GitLab Project
+	checker := domain.NewAccessChecker(
+		gitlabAuth,
+		domain.AccessLevel(cfg.Access.MinReadAccessLevel),
+		domain.AccessLevel(cfg.Access.MinWriteAccessLevel),
+	)
+
+	// 6. Services
+	teamSvc := service.NewTeamService(teamRepo, repoRepo, checker, gitlabAuth)
+	repoSvc := service.NewRepositoryService(repoRepo, teamRepo, checker, gitlabAuth)
+	standardSvc := service.NewStandardService(standardRepo, versionRepo, teamRepo, repoRepo, checker, gitlabAuth)
 	ciSvc := service.NewCIService(repoRepo, standardRepo, versionRepo, gitlabAuth)
 
-	// 6. Handlers
+	// 7. Handlers
 	teamH := handler.NewTeamHandler(teamSvc)
 	repoH := handler.NewRepositoryHandler(repoSvc)
 	standardH := handler.NewStandardHandler(standardSvc)
 	ciH := handler.NewCIHandler(ciSvc)
 
-	// 7. Router
+	// 8. Router
 	r := gin.New()
 	r.Use(gin.Recovery())
 
@@ -83,7 +89,6 @@ func run(logger *slog.Logger) error {
 	})
 
 	// /internal/v1/ — machine-to-machine, аутентификация по CI_JOB_TOKEN.
-	// Токен проверяется внутри handler'а (не через Bearer middleware).
 	internal := r.Group("/internal/v1")
 	{
 		internal.GET("/projects/:gitlab_project_id/standard", ciH.GetStandard)
@@ -107,7 +112,10 @@ func run(logger *slog.Logger) error {
 		api.PUT("/teams/:slug/standards/versions/:version_id/activate", standardH.Activate)
 	}
 
-	logger.Info("starting standards-service", "port", cfg.Server.Port)
+	logger.Info("starting standards-service", "port", cfg.Server.Port,
+		"min_read_access_level", cfg.Access.MinReadAccessLevel,
+		"min_write_access_level", cfg.Access.MinWriteAccessLevel,
+	)
 	return r.Run(":" + cfg.Server.Port)
 }
 

@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"time"
 
+	"cr-assistant/internal/codereview"
 	"cr-assistant/internal/config"
 	"cr-assistant/internal/domain"
 	"cr-assistant/internal/gitlab"
@@ -68,13 +69,11 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		var notFound *standardsclient.ErrNotFound
 		if errors.As(err, &notFound) {
-			// Проект не зарегистрирован в standards-service — это штатная ситуация.
 			logger.Info("no code standard registered for this project, using LLM defaults",
 				"project_id", projectID,
 			)
 		} else {
 			// Сервис недоступен — логируем предупреждение, продолжаем без стандарта.
-			// Это позволяет боту работать даже если standards-service временно упал.
 			logger.Warn("standards-service unavailable, proceeding without code standard",
 				"error", err,
 			)
@@ -82,8 +81,6 @@ func run(logger *slog.Logger) error {
 	} else {
 		codeStandard = std.BuildPromptContext()
 		logger.Info("code standard loaded",
-			"preset", std.Preset,
-			"language", std.Language,
 			"version", std.Version,
 			"has_custom_rules", std.CustomRules != "",
 		)
@@ -103,21 +100,32 @@ func run(logger *slog.Logger) error {
 	)
 	reportRenderer := report.NewRenderer()
 
+	// 5. Загрузчик .codereview.yml — читает настройки из репозитория через GitLab API.
+	//    CI_JOB_TOKEN имеет доступ к файлам репозитория по умолчанию.
+	crLoader := codereview.NewLoader(
+		cfg.GitLab.BaseURL,
+		cfg.GitLab.JobToken,
+		time.Duration(cfg.GitLab.TimeoutSec)*time.Second,
+	)
+
 	orchestrator := review.NewOrchestrator(
 		gitlabClient,
 		llmGateway,
 		reportRenderer,
+		crLoader,
 		logger,
 	)
 
-	// 5. Анализ MR
+	// 6. Анализ MR
 	ctx := context.Background()
 	result, err := orchestrator.Run(ctx, projectID, mrIID, codeStandard)
 	if err != nil {
 		return fmt.Errorf("orchestrator: %w", err)
 	}
 
-	// 6. Exit code
+	// 7. Exit code определяется .codereview.yml block_on_critical
+	//    (оркестратор уже прочитал конфиг; здесь используем HasCritical + cfg.Runner.BlockOnCritical
+	//    как fallback для обратной совместимости с переменной окружения BLOCK_ON_CRITICAL).
 	if cfg.Runner.BlockOnCritical && result.HasCritical {
 		logger.Warn("critical issues found, blocking merge",
 			"critical_count", result.TotalByLevel[domain.SeverityCritical],

@@ -23,7 +23,6 @@ func NewCodeStandardRepo(db *sql.DB) *CodeStandardRepo {
 	return &CodeStandardRepo{db: db}
 }
 
-// Upsert создаёт стандарт для команды если его нет, иначе возвращает существующий.
 func (r *CodeStandardRepo) Upsert(ctx context.Context, standard *domain.CodeStandard) (*domain.CodeStandard, error) {
 	existing, err := r.GetByTeamID(ctx, standard.TeamID)
 	if err == nil {
@@ -90,10 +89,10 @@ func (r *StandardVersionRepo) Create(ctx context.Context, v *domain.StandardVers
 	v.CreatedAt = time.Now()
 
 	_, err := r.db.ExecContext(ctx, `
-		INSERT INTO standard_versions (id, code_standard_id, version, preset, custom_rules, language, comment, created_by, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-		v.ID, v.CodeStandardID, v.Version, v.Preset,
-		v.CustomRules, v.Language, v.Comment, v.CreatedBy, v.CreatedAt,
+		INSERT INTO standard_versions (id, code_standard_id, version, custom_rules, comment, created_by, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		v.ID, v.CodeStandardID, v.Version,
+		v.CustomRules, v.Comment, v.CreatedBy, v.CreatedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("standard version create: %w", err)
@@ -104,11 +103,11 @@ func (r *StandardVersionRepo) Create(ctx context.Context, v *domain.StandardVers
 func (r *StandardVersionRepo) GetByID(ctx context.Context, id string) (*domain.StandardVersion, error) {
 	v := &domain.StandardVersion{}
 	err := r.db.QueryRowContext(ctx, `
-		SELECT id, code_standard_id, version, preset, custom_rules, language, comment, created_by, created_at
+		SELECT id, code_standard_id, version, custom_rules, comment, created_by, created_at
 		FROM standard_versions WHERE id = $1`, id,
 	).Scan(
-		&v.ID, &v.CodeStandardID, &v.Version, &v.Preset,
-		&v.CustomRules, &v.Language, &v.Comment, &v.CreatedBy, &v.CreatedAt,
+		&v.ID, &v.CodeStandardID, &v.Version,
+		&v.CustomRules, &v.Comment, &v.CreatedBy, &v.CreatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("standard version %q not found", id)
@@ -119,18 +118,17 @@ func (r *StandardVersionRepo) GetByID(ctx context.Context, id string) (*domain.S
 	return v, nil
 }
 
-// GetActive возвращает активную версию стандарта через JOIN с code_standards.
 func (r *StandardVersionRepo) GetActive(ctx context.Context, standardID string) (*domain.StandardVersion, error) {
 	v := &domain.StandardVersion{}
 	err := r.db.QueryRowContext(ctx, `
-		SELECT sv.id, sv.code_standard_id, sv.version, sv.preset, sv.custom_rules,
-		       sv.language, sv.comment, sv.created_by, sv.created_at
+		SELECT sv.id, sv.code_standard_id, sv.version, sv.custom_rules,
+		       sv.comment, sv.created_by, sv.created_at
 		FROM standard_versions sv
 		JOIN code_standards cs ON cs.active_version_id = sv.id
 		WHERE cs.id = $1`, standardID,
 	).Scan(
-		&v.ID, &v.CodeStandardID, &v.Version, &v.Preset,
-		&v.CustomRules, &v.Language, &v.Comment, &v.CreatedBy, &v.CreatedAt,
+		&v.ID, &v.CodeStandardID, &v.Version,
+		&v.CustomRules, &v.Comment, &v.CreatedBy, &v.CreatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("no active version for standard %q", standardID)
@@ -143,7 +141,7 @@ func (r *StandardVersionRepo) GetActive(ctx context.Context, standardID string) 
 
 func (r *StandardVersionRepo) ListByStandard(ctx context.Context, standardID string) ([]*domain.StandardVersion, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT id, code_standard_id, version, preset, custom_rules, language, comment, created_by, created_at
+		SELECT id, code_standard_id, version, custom_rules, comment, created_by, created_at
 		FROM standard_versions WHERE code_standard_id = $1 ORDER BY version DESC`, standardID)
 	if err != nil {
 		return nil, fmt.Errorf("standard version list: %w", err)
@@ -154,8 +152,8 @@ func (r *StandardVersionRepo) ListByStandard(ctx context.Context, standardID str
 	for rows.Next() {
 		v := &domain.StandardVersion{}
 		if err := rows.Scan(
-			&v.ID, &v.CodeStandardID, &v.Version, &v.Preset,
-			&v.CustomRules, &v.Language, &v.Comment, &v.CreatedBy, &v.CreatedAt,
+			&v.ID, &v.CodeStandardID, &v.Version,
+			&v.CustomRules, &v.Comment, &v.CreatedBy, &v.CreatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("standard version scan: %w", err)
 		}
@@ -164,7 +162,6 @@ func (r *StandardVersionRepo) ListByStandard(ctx context.Context, standardID str
 	return versions, rows.Err()
 }
 
-// GetNextVersion возвращает MAX(version) + 1 для стандарта.
 func (r *StandardVersionRepo) GetNextVersion(ctx context.Context, standardID string) (int, error) {
 	var max sql.NullInt64
 	err := r.db.QueryRowContext(ctx,

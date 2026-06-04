@@ -1,16 +1,9 @@
 // Package mockserver предоставляет общий httptest-сервер,
-// эмулирующий GitLab API v4 и LLM API для тестирования cr-assistant и standards-service.
-//
-// Использование:
-//
-//	srv := mockserver.New()
-//	defer srv.Close()
-//
-//	srv.GitLab.SetMR(1, 42, mockserver.MR{...})
-//	srv.LLM.SetComments([]mockserver.LLMComment{...})
+// эмулирующий GitLab API v4 и LLM API для тестирования cr-assistant.
 package mockserver
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -24,13 +17,11 @@ import (
 // Top-level server
 // =============================================================================
 
-// Server — общий mock-сервер. GitLab и LLM роутятся по префиксу пути.
 type Server struct {
 	*httptest.Server
 	GitLab *GitLabMock
 	LLM    *LLMMock
 
-	// Все входящие запросы пишутся сюда для assertions в тестах.
 	mu       sync.Mutex
 	requests []RecordedRequest
 }
@@ -41,7 +32,6 @@ type RecordedRequest struct {
 	Body   []byte
 }
 
-// New создаёт и запускает mock-сервер.
 func New() *Server {
 	gl := newGitLabMock()
 	llm := newLLMMock()
@@ -50,19 +40,16 @@ func New() *Server {
 
 	mux := http.NewServeMux()
 
-	// GitLab API — всё на /api/v4/...
 	mux.HandleFunc("/api/v4/", func(w http.ResponseWriter, r *http.Request) {
 		s.record(r)
 		gl.ServeHTTP(w, r)
 	})
 
-	// LLM API — основной эндпоинт для анализа
 	mux.HandleFunc("/analyze", func(w http.ResponseWriter, r *http.Request) {
 		s.record(r)
 		llm.ServeHTTP(w, r)
 	})
 
-	// Health-check
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]string{"status": "ok"})
 	})
@@ -71,7 +58,6 @@ func New() *Server {
 	return s
 }
 
-// Requests возвращает копию всех записанных запросов.
 func (s *Server) Requests() []RecordedRequest {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -80,7 +66,6 @@ func (s *Server) Requests() []RecordedRequest {
 	return out
 }
 
-// RequestsTo возвращает запросы к указанному пути.
 func (s *Server) RequestsTo(path string) []RecordedRequest {
 	var out []RecordedRequest
 	for _, r := range s.Requests() {
@@ -104,7 +89,6 @@ func (s *Server) record(r *http.Request) {
 // GitLab Mock
 // =============================================================================
 
-// MR описывает Merge Request для mock-сервера.
 type MR struct {
 	IID      int
 	DiffRefs DiffRefs
@@ -124,14 +108,18 @@ type FileDiff struct {
 	NewFile bool
 }
 
-// GitLabUser описывает пользователя для mock GitLab.
 type GitLabUser struct {
 	ID       int
 	Username string
 	Name     string
 }
 
-// GitLabMock эмулирует GitLab API v4.
+type GitLabGroup struct {
+	ID       int
+	Name     string
+	FullPath string
+}
+
 type GitLabMock struct {
 	mu sync.RWMutex
 
@@ -141,38 +129,27 @@ type GitLabMock struct {
 	// token → user
 	users map[string]*GitLabUser
 
-	// groupID → userID → accessLevel
-	groupAccess map[int]map[int]int
-
 	// projectID → userID → accessLevel
 	projectAccess map[int]map[int]int
-
-	// groupID → group info
-	groups map[int]GitLabGroup
 
 	// Записанные комментарии: projectID → mrIID → []string
 	comments   map[int]map[int][]string
 	commentsMu sync.Mutex
-}
 
-type GitLabGroup struct {
-	ID       int
-	Name     string
-	FullPath string
+	// Содержимое .codereview.yml (по умолчанию — 404)
+	codeReviewConfig string
+	hasCodeReview    bool
 }
 
 func newGitLabMock() *GitLabMock {
 	return &GitLabMock{
 		mrs:           make(map[int]map[int]*MR),
 		users:         make(map[string]*GitLabUser),
-		groupAccess:   make(map[int]map[int]int),
 		projectAccess: make(map[int]map[int]int),
-		groups:        make(map[int]GitLabGroup),
 		comments:      make(map[int]map[int][]string),
 	}
 }
 
-// SetMR регистрирует MR в mock-сервере.
 func (m *GitLabMock) SetMR(projectID int, mr MR) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -182,24 +159,12 @@ func (m *GitLabMock) SetMR(projectID int, mr MR) {
 	m.mrs[projectID][mr.IID] = &mr
 }
 
-// SetUser регистрирует пользователя. token — его Personal Access Token.
 func (m *GitLabMock) SetUser(token string, user GitLabUser) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.users[token] = &user
 }
 
-// SetGroupAccess устанавливает уровень доступа пользователя в группе.
-func (m *GitLabMock) SetGroupAccess(groupID, userID, level int) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.groupAccess[groupID] == nil {
-		m.groupAccess[groupID] = make(map[int]int)
-	}
-	m.groupAccess[groupID][userID] = level
-}
-
-// SetProjectAccess устанавливает уровень доступа пользователя в проекте.
 func (m *GitLabMock) SetProjectAccess(projectID, userID, level int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -209,14 +174,15 @@ func (m *GitLabMock) SetProjectAccess(projectID, userID, level int) {
 	m.projectAccess[projectID][userID] = level
 }
 
-// SetGroup регистрирует GitLab-группу.
-func (m *GitLabMock) SetGroup(g GitLabGroup) {
+// SetCodeReviewConfig устанавливает содержимое .codereview.yml для всех проектов.
+// Если не вызывался — mock вернёт 404 (файл отсутствует).
+func (m *GitLabMock) SetCodeReviewConfig(yaml string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.groups[g.ID] = g
+	m.codeReviewConfig = yaml
+	m.hasCodeReview = true
 }
 
-// Comments возвращает все комментарии опубликованные ботом в MR.
 func (m *GitLabMock) Comments(projectID, mrIID int) []string {
 	m.commentsMu.Lock()
 	defer m.commentsMu.Unlock()
@@ -225,11 +191,11 @@ func (m *GitLabMock) Comments(projectID, mrIID int) []string {
 
 func (m *GitLabMock) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/api/v4")
-	token := r.Header.Get("PRIVATE-TOKEN")
 
 	switch {
-	// GET /api/v4/user — проверка токена
+	// GET /api/v4/user
 	case r.Method == http.MethodGet && path == "/user":
+		token := r.Header.Get("PRIVATE-TOKEN")
 		m.mu.RLock()
 		user, ok := m.users[token]
 		m.mu.RUnlock()
@@ -238,40 +204,14 @@ func (m *GitLabMock) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, 200, map[string]any{
-			"id":       user.ID,
-			"username": user.Username,
-			"name":     user.Name,
+			"id": user.ID, "username": user.Username, "name": user.Name,
 		})
 
-	// GET /api/v4/groups/:id
-	case r.Method == http.MethodGet && matchPath(path, "/groups/", 2):
-		groupID := parseID(path, "/groups/")
-		m.mu.RLock()
-		group, ok := m.groups[groupID]
-		m.mu.RUnlock()
-		if !ok {
-			writeJSON(w, 404, map[string]string{"message": "404 Not Found"})
-			return
-		}
-		writeJSON(w, 200, map[string]any{
-			"id":        group.ID,
-			"name":      group.Name,
-			"full_path": group.FullPath,
-		})
+	// GET /api/v4/job — проверка CI_JOB_TOKEN
+	case r.Method == http.MethodGet && path == "/job":
+		writeJSON(w, 200, map[string]any{"id": 1})
 
-	// GET /api/v4/groups/:id/members/:user_id
-	case r.Method == http.MethodGet && strings.Contains(path, "/groups/") && strings.Contains(path, "/members/"):
-		groupID, userID := parseTwoIDs(path, "/groups/", "/members/")
-		m.mu.RLock()
-		level := m.groupAccess[groupID][userID]
-		m.mu.RUnlock()
-		if level == 0 {
-			writeJSON(w, 404, map[string]string{"message": "404 Not Found"})
-			return
-		}
-		writeJSON(w, 200, map[string]any{"access_level": level})
-
-	// GET /api/v4/projects/:id/members/:user_id
+	// GET /api/v4/projects/:id/members/:user_id и /members/all/:user_id
 	case r.Method == http.MethodGet && strings.Contains(path, "/projects/") && strings.Contains(path, "/members/"):
 		projectID, userID := parseTwoIDs(path, "/projects/", "/members/")
 		m.mu.RLock()
@@ -283,8 +223,26 @@ func (m *GitLabMock) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, 200, map[string]any{"access_level": level})
 
-	// GET /api/v4/projects/:id/merge_requests/:iid — MR info с diff_refs
-	case r.Method == http.MethodGet && strings.Contains(path, "/merge_requests/") && !strings.Contains(path, "/changes") && !strings.Contains(path, "/notes") && !strings.Contains(path, "/discussions"):
+	// GET /api/v4/projects/:id/repository/files/.codereview.yml
+	case r.Method == http.MethodGet && strings.Contains(path, "/repository/files/"):
+		m.mu.RLock()
+		hasConfig := m.hasCodeReview
+		content := m.codeReviewConfig
+		m.mu.RUnlock()
+		if !hasConfig {
+			writeJSON(w, 404, map[string]string{"message": "404 File Not Found"})
+			return
+		}
+		encoded := base64.StdEncoding.EncodeToString([]byte(content))
+		writeJSON(w, 200, map[string]any{
+			"file_name": ".codereview.yml",
+			"content":   encoded,
+			"encoding":  "base64",
+		})
+
+	// GET /api/v4/projects/:id/merge_requests/:iid — MR info
+	case r.Method == http.MethodGet && strings.Contains(path, "/merge_requests/") &&
+		!strings.Contains(path, "/changes") && !strings.Contains(path, "/notes") && !strings.Contains(path, "/discussions"):
 		projectID, mrIID := parseTwoIDs(path, "/projects/", "/merge_requests/")
 		m.mu.RLock()
 		mr := m.mrs[projectID][mrIID]
@@ -315,11 +273,8 @@ func (m *GitLabMock) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		changes := make([]map[string]any, 0, len(mr.Diffs))
 		for _, d := range mr.Diffs {
 			changes = append(changes, map[string]any{
-				"old_path":     d.OldPath,
-				"new_path":     d.NewPath,
-				"diff":         d.Diff,
-				"new_file":     d.NewFile,
-				"deleted_file": false,
+				"old_path": d.OldPath, "new_path": d.NewPath,
+				"diff": d.Diff, "new_file": d.NewFile, "deleted_file": false,
 			})
 		}
 		writeJSON(w, 200, map[string]any{"changes": changes})
@@ -366,7 +321,6 @@ func (m *GitLabMock) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // LLM Mock
 // =============================================================================
 
-// LLMComment — замечание которое mock LLM вернёт в ответе.
 type LLMComment struct {
 	FilePath   string
 	Line       int
@@ -375,26 +329,20 @@ type LLMComment struct {
 	Suggestion string
 }
 
-// LLMMock эмулирует Python LLM API.
 type LLMMock struct {
 	mu       sync.RWMutex
 	comments []LLMComment
-	// Если true — следующий запрос вернёт 500.
 	failNext bool
 }
 
-func newLLMMock() *LLMMock {
-	return &LLMMock{}
-}
+func newLLMMock() *LLMMock { return &LLMMock{} }
 
-// SetComments устанавливает замечания которые вернёт mock LLM.
 func (m *LLMMock) SetComments(comments []LLMComment) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.comments = comments
 }
 
-// SetFailNext заставляет следующий запрос вернуть 500.
 func (m *LLMMock) SetFailNext() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -417,7 +365,6 @@ func (m *LLMMock) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		FilePath string `json:"file_path"`
 	}
-
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, 400, map[string]string{"error": "invalid request body"})
 		return
@@ -429,25 +376,17 @@ func (m *LLMMock) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	out := make([]map[string]any, 0)
-
 	for _, c := range comments {
 		if c.FilePath != "" && c.FilePath != req.FilePath {
 			continue
 		}
-
 		out = append(out, map[string]any{
-			"line":       c.Line,
-			"severity":   c.Severity,
-			"category":   "security",
-			"message":    c.Message,
-			"suggestion": c.Suggestion,
+			"line": c.Line, "severity": c.Severity,
+			"category": "security", "message": c.Message, "suggestion": c.Suggestion,
 		})
 	}
 
-	writeJSON(w, 200, map[string]any{
-		"score":  10,
-		"issues": out,
-	})
+	writeJSON(w, 200, map[string]any{"score": 10, "issues": out})
 }
 
 // =============================================================================
@@ -462,7 +401,6 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 	}
 }
 
-// matchPath проверяет что path начинается с prefix и имеет ровно segments сегментов после него.
 func matchPath(path, prefix string, segments int) bool {
 	if !strings.HasPrefix(path, prefix) {
 		return false
@@ -472,18 +410,14 @@ func matchPath(path, prefix string, segments int) bool {
 	return len(parts) == segments-1
 }
 
-// parseID извлекает числовой ID из пути вида /prefix/123.
 func parseID(path, prefix string) int {
 	rest := strings.TrimPrefix(path, prefix)
 	rest = strings.SplitN(rest, "/", 2)[0]
 	var id int
-	if _, err := fmt.Sscanf(rest, "%d", &id); err != nil {
-		return 0
-	}
+	fmt.Sscanf(rest, "%d", &id)
 	return id
 }
 
-// parseTwoIDs извлекает два числовых ID из пути вида /prefix1/123/prefix2/456.
 func parseTwoIDs(path, prefix1, prefix2 string) (int, int) {
 	after1 := strings.TrimPrefix(path, prefix1)
 	parts := strings.SplitN(after1, prefix2, 2)
@@ -491,11 +425,11 @@ func parseTwoIDs(path, prefix1, prefix2 string) (int, int) {
 		return 0, 0
 	}
 	var id1, id2 int
-	if _, err := fmt.Sscanf(strings.SplitN(parts[0], "/", 2)[0], "%d", &id1); err != nil {
-		return 0, 0
-	}
-	if _, err := fmt.Sscanf(strings.SplitN(parts[1], "/", 2)[0], "%d", &id2); err != nil {
-		return 0, 0
-	}
+	fmt.Sscanf(strings.SplitN(parts[0], "/", 2)[0], "%d", &id1)
+	fmt.Sscanf(strings.SplitN(parts[1], "/", 2)[0], "%d", &id2)
 	return id1, id2
 }
+
+// Подавляем предупреждение о неиспользуемой функции
+var _ = matchPath
+var _ = parseID

@@ -26,7 +26,7 @@ func NewCIHandler(svc *service.CIService) *CIHandler {
 //
 // Response 200:
 //
-//	{"preset":"...","custom_rules":"...","language":"ru","version":3}
+//	{"custom_rules":"...","version":3}
 //
 // Response 404: проект не зарегистрирован или стандарт не настроен.
 // cr-assistant обрабатывает 404 как "работать без стандарта".
